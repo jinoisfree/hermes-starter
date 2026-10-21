@@ -1,0 +1,52 @@
+{
+  "display_information": {
+    "name": "SNS 담당",
+    "description": "SNS 초안과 소식을 살피는 담당"
+  },
+  "features": {
+    "bot_user": {
+      "display_name": "sns-manager",
+      "always_online": false
+    },
+    "agent_view": {
+      "agent_description": "SNS 초안과 소식을 살피는 담당"
+    },
+    "app_home": {
+      "messages_tab_enabled": true,
+      "messages_tab_read_only_enabled": false
+    }
+  },
+  "oauth_config": {
+    "scopes": {
+      "bot": [
+        "app_mentions:read",
+        "chat:write",
+        "im:history",
+        "im:read",
+        "im:write",
+        "channels:history",
+        "groups:history",
+        "mpim:history",
+        "channels:read",
+        "users:read",
+        "mpim:read",
+        "assistant:write",
+        "files:read"
+      ]
+    }
+  },
+  "settings": {
+    "event_subscriptions": {
+      "bot_events": [
+        "app_mention",
+        "message.im",
+        "message.mpim",
+        "message.channels",
+        "message.groups",
+        "app_home_opened",
+        "app_context_changed"
+      ]
+    },
+    "socket_mode_enabled": true
+  }
+}

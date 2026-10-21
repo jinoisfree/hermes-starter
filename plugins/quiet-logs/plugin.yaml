@@ -1,0 +1,3 @@
+name: quiet-logs
+version: 0.1.0
+description: Suppress known harmless repeated gateway messages.

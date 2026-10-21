@@ -1,0 +1,5 @@
+{
+  "name": "sns-manager",
+  "display_name": "SNS 담당",
+  "description": "SNS 게시물·답장 초안을 만들고 요청받은 소식을 정리합니다."
+}

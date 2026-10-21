@@ -1,0 +1,38 @@
+{
+  "slug": "sns-manager",
+  "display_name": "SNS 담당",
+  "tagline": "SNS 초안과 소식을 살피는 담당",
+  "description": "SNS 게시물·답장 초안을 만들고 요청받은 소식을 정리합니다.",
+  "plugins": [
+    "quiet-logs"
+  ],
+  "env": [
+    "SLACK_BOT_TOKEN",
+    "SLACK_APP_TOKEN",
+    "SLACK_ALLOWED_USERS"
+  ],
+  "services": [
+    "Slack",
+    "모델 제공자",
+    "SNS 계정(선택)"
+  ],
+  "works_with": [
+    {
+      "slug": "llm-wiki",
+      "feature": "콘텐츠 참고 자료"
+    },
+    {
+      "slug": "system-doctor",
+      "feature": "SNS 도구 오류 진단"
+    }
+  ],
+  "launchd": [
+    "launchd/sns-manager.plist.template"
+  ],
+  "can_be_default": true,
+  "optional_features": {
+    "personal_integrations": "직접 연결 필요",
+    "automatic_sends": false,
+    "delegation": "직접 연결 필요"
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "model": {
+    "provider": "{{MODEL_PROVIDER}}",
+    "default": "{{MODEL}}"
+  },
+  "agent": {
+    "disabled_toolsets": [
+      "delegate_task"
+    ]
+  },
+  "platforms": {
+    "slack": {
+      "enabled": true
+    }
+  },
+  "plugins": {
+    "entries": {
+      "quiet-logs": {
+        "enabled": true
+      }
+    }
+  },
+  "sessions": {
+    "auto_prune": false
+  }
+}

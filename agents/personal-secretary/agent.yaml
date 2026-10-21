@@ -1,0 +1,42 @@
+{
+  "slug": "personal-secretary",
+  "display_name": "개인비서",
+  "tagline": "개인 일정·메일과 AI 아이디어를 정리",
+  "description": "개인 일정·메일·할 일 조회와 아이디어 탐색을 돕습니다.",
+  "plugins": [
+    "quiet-logs"
+  ],
+  "env": [
+    "SLACK_BOT_TOKEN",
+    "SLACK_APP_TOKEN",
+    "SLACK_ALLOWED_USERS"
+  ],
+  "services": [
+    "Slack",
+    "모델 제공자",
+    "개인 메일·일정(선택)"
+  ],
+  "works_with": [
+    {
+      "slug": "llm-wiki",
+      "feature": "아이디어와 참고 자료 축적"
+    },
+    {
+      "slug": "work-assistant",
+      "feature": "개인·회사 범위에 따른 요청 전달"
+    },
+    {
+      "slug": "system-doctor",
+      "feature": "도구 오류 진단"
+    }
+  ],
+  "launchd": [
+    "launchd/personal-secretary.plist.template"
+  ],
+  "can_be_default": true,
+  "optional_features": {
+    "personal_integrations": "직접 연결 필요",
+    "automatic_sends": false,
+    "delegation": "직접 연결 필요"
+  }
+}
