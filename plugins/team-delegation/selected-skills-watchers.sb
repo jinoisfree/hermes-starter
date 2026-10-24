@@ -1,0 +1,55 @@
+(version 1)
+(allow default)
+(deny appleevent-send)
+(deny mach-lookup
+    (global-name "com.apple.SecurityServer")
+    (global-name "com.apple.securityd.xpc")
+    (global-name "com.apple.securityd")
+    (global-name "com.apple.coreservices.appleevents"))
+; These command-line brokers are not needed by the selected skills.
+(deny process-exec (literal "/usr/bin/osascript") (literal "/usr/bin/security")
+    (literal "/usr/bin/shortcuts") (literal "/usr/bin/automator") (literal "/usr/bin/open"))
+(deny process-info*)
+(allow process-info* (target self))
+; Exclude only this profile's skill code and scratch data from the Hermes read denial.
+(deny file-read*
+    (require-all
+        (subpath (param "HERMES_ROOT"))
+        (require-not (subpath (param "SKILLS")))
+        (require-not (subpath (param "WORKSPACE")))
+        (require-not (subpath (param "WATCHER_STATE")))))
+(deny file-read*
+    (subpath (string-append (param "HOME") "/.ssh"))
+    (subpath (string-append (param "HOME") "/.codex"))
+    (subpath (string-append (param "HOME") "/.claude"))
+    (subpath (string-append (param "HOME") "/.paseo"))
+    (subpath (string-append (param "HOME") "/.config"))
+    (subpath (string-append (param "HOME") "/.aws"))
+    (literal (string-append (param "HOME") "/.netrc"))
+    (subpath (string-append (param "HOME") "/.gnupg"))
+    (subpath (string-append (param "HOME") "/Library/Keychains"))
+    (subpath (string-append (param "HOME") "/Library/Application Support"))
+    (subpath (string-append (param "HOME") "/Library/Cookies"))
+    (subpath (string-append (param "HOME") "/Library/Mail"))
+    (subpath (string-append (param "HOME") "/Library/Messages"))
+    (subpath (string-append (param "HOME") "/Library/Group Containers"))
+    (subpath (param "REPOSITORIES"))
+    (require-all
+        (subpath (string-append (param "HOME") "/.local/share"))
+        (require-not (subpath (param "DEPENDENCIES")))) )
+(deny file-write*)
+(allow file-write*
+    (subpath (param "WORKSPACE"))
+    (subpath "/private/tmp")
+    (subpath "/private/var/folders")
+    (literal "/dev/null")
+    (literal "/dev/tty")
+    (literal "/dev/stdout")
+    (literal "/dev/stderr"))
+(allow file-write* (subpath (param "WATCHER_STATE")))
+; Ancestor metadata is required by realpath; directory contents remain denied.
+(allow file-read-metadata
+    (literal (param "HERMES_ROOT"))
+    (literal (string-append (param "HERMES_ROOT") "/profiles"))
+    (literal (param "PROFILE_HOME"))
+    (literal (string-append (param "HOME") "/.local/share")))

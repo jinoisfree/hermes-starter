@@ -1,0 +1,44 @@
+name: team-delegation
+version: 0.6.12
+description: "Governed workflow budgets, EventKit calendar executor, canonical ownership."
+author: starter_user
+provides_tools:
+  - contacts_direct_lookup
+  - contacts_direct_mutation
+  - diagnosis_health_read
+  - calendar_direct_lookup
+  - calendar_direct_mutation
+  - google_calendar_color_get
+  - google_calendar_color_set
+  - reminders_direct_lookup
+  - reminders_direct_mutation
+  - apple_notes_direct_lookup
+  - apple_notes_direct_mutation
+  - gmail_direct
+  - messages_direct_lookup
+  - personal_work_bundle
+  - personal_work_rollback
+  - common_work_create
+  - common_work_get
+  - common_work_link
+  - common_work_complete
+  - knowledge_ref_link
+  - knowledge_ref_get
+  - knowledge_ref_unlink
+  - wiki_direct
+  - gateway_runtime_snapshot
+  - file_list
+  - file_trash
+  - claude_code_artifact
+  - paseo
+  - personal_report
+  - limit_report
+provides_hooks:
+  - pre_tool_call
+  - post_approval_response
+  - transform_llm_output
+  - kanban_task_claimed
+provides_middleware:
+  - llm_request
+  - llm_execution
+  - tool_execution

@@ -1,0 +1,56 @@
+name: team-kit
+version: 0.9.1
+description: "Context bridge, tool policy, reversible learning and recall, work handoffs, private location, read-only diagnosis, public X reading, and read-only Slack history."
+author: starter_user
+provides_hooks:
+  - pre_api_request
+  - pre_gateway_dispatch
+  - post_gateway_admission
+  - pre_llm_call
+  - pre_tool_call
+  - post_tool_call
+  - post_llm_call
+  - post_api_request
+  - api_request_error
+provides_middleware:
+  - llm_request
+provides_tools:
+  - news_watch_read
+  - morning_report
+  - table_analyze
+  - doc_compare
+  - consultation_report
+  - store_guidance_check
+  - work_crosscheck
+  - mail_waiting
+  - team_project
+  - team_diagnosis_request
+  - team_learn
+  - team_learn_review
+  - team_skill_review
+  - report_status
+  - team_recall
+  - team_work
+  - file_list
+  - file_move
+  - folder_create
+  - file_trash
+  - file_copy
+  - doc_edit
+  - pdf_pages
+  - doc_convert
+  - doc_fill
+  - doc_read
+  - pdf_render
+  - folder_scan
+  - notion
+  - x_posts
+  - slack_history
+  - deadline_watch
+  - cron_status
+  - mail_read
+  - calendar_read
+  - notes_read
+  - reminders_read
+  - file_link
+  - file_location

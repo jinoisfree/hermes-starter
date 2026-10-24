@@ -1,7 +1,7 @@
 # Hermes Starter
 
 공개 [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent)에 역할별 설정을 더하는 시작 틀입니다.
-개인 설정·기억·대화·계정 연동 코드는 포함하지 않습니다. Python 3와 bash가 필요합니다.
+개인 설정·기억·대화·실제 계정 정보는 포함하지 않습니다. Python 3와 bash가 필요합니다.
 
 | slug | 표시 이름 | 특징 | 필요한 서비스 |
 |---|---|---|---|
@@ -30,7 +30,10 @@ bash install.sh --agents llm-wiki,personal-secretary --home ~/.hermes --label-pr
 
 추가 설치의 `.starter/collaboration/<번호>.json`은 선택한 상대만 담는 **안내 조각**입니다.
 설정이나 SOUL을 자동으로 고치지 않으며, 협업 도구·연결은 직접 구현해야 합니다.
-공통 플러그인은 quiet-logs만 포함합니다.
+quiet-logs와 team-kit·team-delegation 코드를 포함합니다. 계정·경로·표시명은 일반 자리표시로 치환하며 직접 연결과 설정이 필요합니다.
+기본 설치 선택은 기존 템플릿을 유지하므로 새 플러그인은 자동 활성화되지 않습니다.
+공개 Hermes 본체에는 개인 수정 브랜치의 기능(예: Slack 버튼 reply_buttons)이 없어 일부 기능이 제한됩니다.
+이 출력은 비공개 생성기의 --publish 모드로 재생성·검사 후 갱신합니다. 수동 수정은 다음 갱신을 차단합니다.
 SNS 자동 DM·게시·감시, 개인 메일·일정·문서 연동과 예약 실행은 기본으로 꺼져 있으며 직접 연결해야 합니다.
 라이선스는 아직 정하지 않았습니다. 재배포 조건은 확정 후 안내합니다.
 

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>com.starter_user.hermes.contacts-direct</string>
+<key>CFBundleName</key><string>Hermes Contacts</string>
+<key>NSContactsUsageDescription</key><string>업무비서가 소유자가 요청한 명함을 연락처에 등록하고 연락처를 조회·수정합니다.</string>
+</dict></plist>
