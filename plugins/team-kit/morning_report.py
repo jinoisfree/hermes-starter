@@ -12,8 +12,8 @@ from zoneinfo import ZoneInfo
 
 PROFILES = {'sns-manager', 'work-assistant', 'personal-secretary'}
 KST = ZoneInfo('Asia/Seoul')
-WORKSPACE = 'https://teamstarter_user.slack.com'
-NOTE = ('[아침 보고 다시 보기] “오늘 보고”, “아침 보고를 새 방식으로 다시”는 매일 08:30 보고(학습은 학원 채널, 자동 답장 등 그 밖의 보고는 보고방 채널, 설정이 없으면 개인 DM)를 뜻한다. '
+WORKSPACE = 'https://REPLACE_SLACK_WORKSPACE'
+NOTE = ('[아침 보고 다시 보기] “오늘 보고”, “아침 보고를 새 방식으로 다시”는 매일 08:30 보고(학습은 학습 채널, 자동 답장 등 그 밖의 보고는 보고 채널, 설정이 없으면 개인 DM)를 뜻한다. '
         '새 방식은 굵은 제목·빈 줄·인용 들여쓰기·색 표식, 최대 5개 한 줄 미리보기와 상세 분리다. '
         '형식이나 보고 종류를 되묻거나 session_search로 형식을 찾지 말고 morning_report를 먼저 호출한다. '
         'SNS담당는 학습과 인스타그램·톡톡 자동 답장 두 보고를 함께 확인한다. 상담 통계 집계와 다르다. '
@@ -43,11 +43,11 @@ def owner(home, session_id):
     learning = local('learning')
     learning.extension('learning_skills').human_context()
     src = learning.source(home, session_id, allow_approval=True)
-    # SNS담당's auto-reply report lives in the owner report room (보고방), so that room counts too.
+    # SNS담당's auto-reply report lives in the owner report room (보고 채널), so that room counts too.
     room = learning.owner_report_room(home)
     if not (learning.owner_report_place(home, src) or (
             room and src.get('chat_type') == 'group' and src.get('chat_id') == room)):
-        raise ValueError('아침 보고는 소유자 개인 DM이나 학원·보고방에서만 다시 볼 수 있습니다.')
+        raise ValueError('아침 보고는 소유자 개인 DM이나 학습·보고 채널에서만 다시 볼 수 있습니다.')
     return src
 
 
@@ -105,7 +105,7 @@ def snapshot(home, args, src, *, now=None):
         if record.get('owner') and record['owner'] != src['user_id']:
             raise ValueError('report_owner_mismatch')
         # Never expose the owner's report to a different DM or a customer thread:
-        # only this conversation, the shared report rooms (학원·보고방), or (from a room) the owner's own DM.
+        # only this conversation, the shared report rooms (학습·보고 채널), or (from a room) the owner's own DM.
         learning = local('learning')
         rooms = {r for r in (learning.report_channel(home), learning.owner_report_room(home)) if r}
         if record.get('channel') and record['channel'] not in {src['chat_id']} | rooms and not (
@@ -171,7 +171,7 @@ def filter_request(config, home, request, *, kind):
 
 
 SCHEMA = {'name': 'morning_report',
-          'description': '오늘 아침 보고를 새 방식으로 다시 보여줄 때 먼저 사용. Read saved 08:30 reports (learning: 학원, sns-manager replies: 보고방, owner DM if unset) in the current concise layout. sns-manager includes learning and automatic replies. Read-only; no posting or customer sends. Review in original report thread.',
+          'description': '오늘 아침 보고를 새 방식으로 다시 보여줄 때 먼저 사용. Read saved 08:30 reports (learning: 학습 채널, sns-manager replies: 보고 채널, owner DM if unset) in the current concise layout. sns-manager includes learning and automatic replies. Read-only; no posting or customer sends. Review in original report thread.',
           'parameters': {'type': 'object', 'properties': {
               'report_date': {'type': 'string', 'description': 'Report date YYYY-MM-DD KST (default today); reads previous-day data.'},
               'kind': {'type': 'string', 'enum': ['all', 'learning', 'replies']},

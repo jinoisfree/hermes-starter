@@ -11,7 +11,7 @@ import subprocess
 import time
 
 ROOT = Path.home() / '.hermes'
-REPO = (Path.home() / 'hermes-config').resolve()
+REPO = (Path.home() / 'workspace/Hermes-desktop-pet').resolve()
 COMMANDS = {'grep', 'rg', 'sed', 'awk', 'head', 'tail', 'wc', 'sort', 'uniq', 'cut', 'ls', 'find', 'stat', 'cat', 'jq', 'git'}
 TIMEOUT = 30
 MAX_OUTPUT = 20000

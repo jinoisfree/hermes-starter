@@ -26,8 +26,7 @@ import deadline_time as dt
 
 DATABASE = ''
 ACCOUNT = 'user(at)example.com'
-DATE = re.compile(r'(\d{4})\s*(?:[-./]|년\s*)(\d{1,2})\s*(?:[-./]|월\s*)(\d{1,2})(?:일)?'
-                  r'(?:(?:T|\s+)(?:(오전|오후)\s*)?(\d{1,2})(?::|시\s*)(\d{2})?(?:분)?(?::00)?(Z|[+-]\d{2}:\d{2})?)?')
+DATE = dt.DEADLINE
 
 
 def module(name, path):
@@ -43,20 +42,7 @@ def title_key(value):
 
 
 def quote_deadline(quote):
-    found = []
-    for m in DATE.finditer(quote):
-        year, month, day, period, hour, minute, zone = m.groups()
-        value = f'{int(year):04d}-{int(month):02d}-{int(day):02d}'
-        if hour is not None:
-            h = int(hour)
-            if period:
-                if not 1 <= h <= 12: raise ValueError('invalid_deadline_time')
-                h = h % 12 + (12 if period == '오후' else 0)
-            value += f'T{h:02d}:{int(minute or 0):02d}{zone or "+09:00"}'
-        found.append(dt.canonical(value))
-    if len(set(found)) != 1:
-        raise ValueError('one_explicit_deadline_with_year_required')
-    return found[0]
+    return dt.extract(quote)
 
 
 def save(path, data):
@@ -97,7 +83,7 @@ class Native:
         self.scopes = hermes_yaml.safe_load((self.root / 'config.yaml').read_text())['plugins']['entries']['team-kit']['settings']['personal_scopes']
         if self.scopes.get('enabled') is not True:
             raise ValueError('company_scope_required')
-        self.store = CommonWorkStore(self.root / 'shared/common-work-links.sqlite3')
+        self.store = CommonWorkStore.production(self.root / 'shared/common-work-links.sqlite3')
 
     def guard(self, domain, args):
         self.td.personal_scopes.authorize_mutation(self.td, domain, args, {}, scope_config=self.scopes, owner_scope='company')
@@ -162,12 +148,12 @@ class Native:
         raise ValueError('source_kind_required')
 
     def all(self):
-        result = subprocess.run(['remindctl', 'show', 'all', '--json', '--no-input', '--no-color'], capture_output=True, text=True, timeout=30)
-        if result.returncode: raise ValueError('reminder_read_failed')
-        rows = json.loads(result.stdout)
-        if not isinstance(rows, list) or any(not isinstance(r, dict) or not r.get('id') for r in rows):
-            raise ValueError('reminder_read_invalid')
-        return rows
+        import reminder_reads
+        return reminder_reads.all(subprocess.run)
+
+    def current_reminder(self, identifier):
+        import reminder_reads
+        return reminder_reads.one(identifier, subprocess.run)
 
     def create(self, task, due, marker, source, list_name):
         self.guard('todo', {'action': 'create', 'list': list_name})
@@ -195,6 +181,27 @@ def related(store, source):
     return store.get(ids[0]) if ids else None
 
 
+def matching_reminders(rows, task, list_name):
+    """Completed matches also prevent recreating an already registered task."""
+    return [r for r in rows if title_key(r.get('title')) == title_key(task) and r.get('listName') == list_name]
+
+
+def capture_preflight(operations, rows):
+    kinds = [op['domain'] for op in operations]
+    if len(kinds) != len(set(kinds)) or any(op['action'] != 'create' for op in operations):
+        raise ValueError('task capture creates at most one original per selected destination')
+    for op in operations:
+        if op['domain'] != 'todo':
+            continue
+        args = op['arguments']
+        if not dt.canonical(args.get('due')):
+            raise ValueError('task capture reminder requires the explicit deadline')
+        if re.search(r'D\s*[-−]\s*(?:7|3|1)\b', args.get('title', ''), re.I):
+            raise ValueError('split advance reminders are not allowed')
+        if matching_reminders(rows, args.get('title', ''), args.get('list') or 'Hermes'):
+            raise ValueError('task already registered, including completed reminders; do not recreate')
+
+
 def verify(row, due, task, list_name):
     return (row.get('title') == task and row.get('listName') == list_name and row.get('isCompleted') is False
             and dt.canonical(row.get('dueDate'), all_day=row.get('dueDateIsAllDay') is True) == due
@@ -214,7 +221,6 @@ def _ensure(home, args, config, *, native=None, now=None):
         raise ValueError('unsupported_deadline_field')
     distance = (date.fromisoformat(due[:10]) - now.astimezone(dt.KST).date()).days
     if distance < 0 or (len(due) > 10 and datetime.fromisoformat(due) < now): raise ValueError('past_deadline_refused')
-    if distance > 7: raise ValueError('deadline_outside_seven_days')
     native = native or Native(home)
     source = native.source(kind, identifier, task, quote, field)
     if due != source['due']: raise ValueError('deadline_conflict')
@@ -238,7 +244,7 @@ def _ensure(home, args, config, *, native=None, now=None):
         rows = native.all()
         marked = [r for r in rows if marker in str(r.get('notes') or '')]
         # Both completed and open matches block new creation; never resurrect a checked task.
-        matches = [r for r in rows if title_key(r.get('title')) == title_key(task) and r.get('listName') == list_name]
+        matches = matching_reminders(rows, task, list_name)
         if len(marked) > 1 or len(matches) > 1: raise ValueError('duplicate_reminder_candidates')
         if previous and previous.get('status') in {'pending', 'uncertain'}:
             raise ValueError('previous_write_uncertain_review_required')

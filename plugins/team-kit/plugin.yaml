@@ -1,5 +1,5 @@
 name: team-kit
-version: 0.9.1
+version: 0.9.5
 description: "Context bridge, tool policy, reversible learning and recall, work handoffs, private location, read-only diagnosis, public X reading, and read-only Slack history."
 author: starter_user
 provides_hooks:

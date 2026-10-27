@@ -1,7 +1,7 @@
 """Bounds for ``cronjob_manage`` in the owner's personal-secretary Slack chat (2026-10-19 사용자 결정).
 
 The core tool can schedule anything: shell scripts, other chats, any model. 개인비서 only needs
-recurring read-only research that reports to 보고방, so every call is checked here before it runs:
+recurring read-only research that reports to 보고 채널, so every call is checked here before it runs:
 who calls, where the output goes, which tools the job gets, how often it fires and which existing
 jobs it may touch. Jobs the 개인비서 chat creates carry the name prefix and are the only ones it can
 change; everything else (예: 개인 메일 요약) stays list-only. Scheduled runs never reach this check
@@ -13,7 +13,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-PREFIX = "jv-"
+PREFIX = "as-"
 MAX_ACTIVE = 10
 MIN_INTERVAL_MINUTES = 60
 TOOLSETS = ("web", "browser", "session_search")
@@ -115,7 +115,7 @@ def _check_fields(args, cfg, *, creating):
             if bad or not _targets(args[key]):
                 return f"{key}는 {', '.join(cfg['deliver'])}만 허용한다."
     if creating and not _targets(args.get("deliver") or ""):
-        return "deliver를 local 또는 보고방(slack:REPLACE_SLACK_ID)으로 직접 지정해야 한다."
+        return "deliver를 local 또는 보고 채널(slack:REPLACE_SLACK_ID)으로 직접 지정해야 한다."
     toolsets = args.get("enabled_toolsets")
     if creating and not toolsets:
         return f"enabled_toolsets를 {', '.join(cfg['toolsets'])} 안에서 직접 지정해야 한다."

@@ -39,15 +39,21 @@ BUSINESS = READS | {"contacts_direct_mutation", "file_move", "file_copy", "folde
                     "common_work_create", "common_work_link", "common_work_complete", "knowledge_ref_link", "knowledge_ref_unlink",
                     "browser_click", "browser_type", "browser_press", "write_file", "patch", "file_trash",
                     "claude_code_artifact", "kanban_create", "kanban_unblock", "kanban_comment", "paseo"}
-BUSINESS |= {"doc_convert", "doc_fill"}
+BUSINESS |= {"doc_convert", "doc_fill", "task_reminders_sync"}
 PREFLIGHT = {"common_work_get", "kanban_show", "kanban_list"}
+UNGATED_READS = {"session_search", "skill_view", "skills_list", "team_recall"}
 # 2026-10-21 사용자 결정(선 작성 후 보고): 일정·미리알림 단건 쓰기는 A가 조회 후 바로 실행하고,
 # 업무 기록은 실제 도구 결과로 자동 작성한다. 승인 버튼·범위 검사는 각 도구가 그대로 맡는다.
-DIRECT = {"contacts_direct_lookup", "contacts_direct_mutation", "calendar_direct_lookup", "reminders_direct_lookup", "google_calendar_color_get",
+DIRECT = {"task_reminders_sync", "contacts_direct_lookup", "contacts_direct_mutation", "calendar_direct_lookup", "reminders_direct_lookup", "google_calendar_color_get",
           "calendar_direct_mutation", "google_calendar_color_set", "reminders_direct_mutation", "personal_work_bundle"}
-DIRECT_NOTE = (" 일정·미리알림 단건 생성·수정·색 지정·삭제와 연락처 단건 생성·수정은 선 작성 후 보고다. 연락처 명함 여러 장도 한 대화에서 A가 바로 처리하며 수정 승인 버튼은 유지한다. team_work(start) 없이 A가 필요한 조회 뒤 "
+# 2026-10-26 사용자 결정: '○○ 완료처리'는 A가 조회 뒤 바로 끝낸다. 메모 조회, 연결 업무 완료,
+# 단독 메모의 complete 폴더 이동만 더한다(그 밖의 메모 쓰기는 계속 team_work 인계).
+DIRECT |= {"apple_notes_direct_lookup", "common_work_get", "common_work_complete"}
+DIRECT_NOTE = (" 일정·미리알림 단건 생성·수정·색 지정·삭제와 연락처 단건·묶음 쓰기는 A가 필요한 조회 뒤 바로 처리한다. 추가성 쓰기는 선 작성 후 보고다. 연락처 create/import_vcf/group_create/group_add는 즉시 실행하며 update/delete/group_rename/group_delete/group_remove는 승인 버튼을 유지한다. team_work(start) 없이 A가 필요한 조회 뒤 "
                "바로 실행하고 결과로 답한다. 업무 기록은 실제 도구 결과로 자동 작성되므로 team_work를 부르지 않는다. "
-               "여러 담당자·선행 조건·메일·파일·Notion이 얽힌 일만 team_work(start)로 B에게 넘긴다.")
+               "업무비서 할 일 등록 체크리스트와 선택 뒤 묶음·노션·연결은 A가 같은 턴에 처리한다. "
+               "소유자가 업무·일정·메모를 완료처리하라고 하면 A가 찾은 원본의 common_id를 common_work_get으로 확인하고 common_work_complete 한 번으로 끝낸다(메모 본문을 고쳐 완료를 흉내 내지 않는다). "
+               "연결 업무가 없는 단독 메모만 apple_notes_direct_mutation(action=move, folder=complete)로 옮긴다. 그 밖에 여러 담당자·선행 조건·메일·파일·Notion이 얽힌 일은 team_work(start)로 B에게 넘긴다.")
 LEARNING = {"memory", "team_learn", "team_learn_review", "team_skill_review", "skill_manage"}
 GMAIL_WRITES = frozenset({"send", "label_create", "label_apply", "filter_create", "filter_delete", "mail_organize", "inbox_restore"})
 GMAIL_INPUT_ERRORS = frozenset({
@@ -60,6 +66,18 @@ GMAIL_INPUT_ERRORS = frozenset({
 SIMPLE = re.compile(r"(?:(?:안녕|안녕하세요|고마워|감사합니다)[.!~ ]*|"
                     r"(?:오늘|내일|이번\s*주)\s*(?:내\s*)?(?:일정|캘린더|할\s*일|미리\s*알림)"
                     r"(?:(?:을|를)?\s*(?:좀\s*)?(?:알려\s*줘|보여\s*줘|확인해\s*줘|조회해\s*줘|알려주세요|보여주세요|확인해주세요|조회해주세요))?[?.!~ ]*)")
+
+
+def completion_move(tool, args):
+    """Moving a memo the owner called finished into 'complete' (2026-10-26) is A's direct write."""
+    args = args or {}
+    return (tool == "apple_notes_direct_mutation" and str(args.get("action") or "").strip() == "move"
+            and str(args.get("folder") or "").strip() == "complete")
+
+
+def direct_tools(home, learning, turn):
+    extra = learning.extension('task_capture').DIRECT if turn and turn.get('task_capture') else set()
+    return DIRECT | extra
 
 
 def settings(home, learning):
@@ -112,10 +130,48 @@ def save(home, data, learning):
     learning.save(path(home, data["case_id"]), data)
 
 
-def public(data):
-    return {k: copy.deepcopy(data[k]) for k in
-            ("case_id", "source", "goal", "scope", "plan", "done_when", "difficulty", "tools", "status",
-             "progress", "next_step", "references", "receipts", "review", "updated_at") if k in data}
+RECENT_RECEIPTS = 10
+SUCCESS_IDS = 60
+
+
+def _receipt_row(receipt):
+    row = {k: receipt[k] for k in ("tool_call_id", "tool", "status", "write", "at") if k in receipt}
+    if "resolved" in receipt:
+        row["resolved"] = copy.deepcopy(receipt["resolved"])
+    return row
+
+
+def public(data, *, detail=False):
+    out = {k: copy.deepcopy(data[k]) for k in
+           ("case_id", "source", "goal", "scope", "plan", "done_when", "difficulty", "tools", "status",
+            "progress", "next_step", "references", "review", "updated_at") if k in data}
+    # Keep every evidence ID and resolution; only older narrative is deferred to read(detail=True).
+    progress = out.get("progress", [])
+    omitted = 0
+    if not detail:
+        for row in progress[:-3]:
+            if "summary" in row and "receipt_id" not in row:
+                del row["summary"]
+                row["summary_omitted"] = True
+                omitted += 1
+    if omitted:
+        out["progress_summary"] = {
+            "total": len(progress), "omitted_summaries": omitted,
+            "detail_request": {"action": "read", "case_id": data["case_id"], "detail": True},
+            "hint": "Read details before relying on an omitted step's narrative; evidence IDs are not its meaning.",
+        }
+    if "receipts" in data:
+        # Replies stay bounded; the stored checkpoint and every guard keep the full receipts.
+        receipts = data["receipts"]
+        recent = len(receipts) - RECENT_RECEIPTS
+        shown = [_receipt_row(r) for i, r in enumerate(receipts) if detail or i >= recent or "resolved" in r
+                 or (r.get("write") and r.get("status") in {"unknown", "partial"})]
+        success = [r["tool_call_id"] for r in receipts if r.get("status") == "success" and r.get("tool_call_id")]
+        out["receipts"] = shown
+        out["receipt_summary"] = {"total": len(receipts), "shown": len(shown), "omitted": len(receipts) - len(shown),
+                                  "success_ids": success if detail else success[-SUCCESS_IDS:],
+                                  "success_ids_omitted": 0 if detail else max(0, len(success) - SUCCESS_IDS)}
+    return out
 
 
 def pending(home, owner_id, *, limit=5, project_source=None):
@@ -187,7 +243,8 @@ def context(home, learning, *, session_id, turn_id="", sender_id="", user_messag
         _TURNS[key(home, turn_id)] = {"owner": sender_id, "session_id": session_id, "request": request,
                                     "phase": "simple" if simple else "interpret", "last_role": "", "simple_request": simple,
                                     "case_id": None, "observations": [], "started_at": time.time(),
-                                    "location_only": location_only}
+                                    "location_only": location_only,
+                                    "task_capture": learning.extension("task_capture").active(home, request, session_id)}
         while len(_TURNS) > 256:
             _TURNS.popitem(last=False)
     if simple:
@@ -240,6 +297,8 @@ def strings(value, label, maximum=12):
 
 
 def writing(tool, args):
+    if tool == 'notion':
+        return args.get('action') in {'create', 'update', 'append', 'edit', 'trash', 'batch', 'api'} and args.get('method', 'POST') != 'GET'
     if tool in READS or tool in {"claude_code_artifact"}:
         return False
     if tool == "gmail_direct":
@@ -271,7 +330,8 @@ def guard(home, learning, *, tool_name, args, session_id, turn_id="", **_):
         turn["phase"] = "interpret"
     if turn["last_role"] in {"interpret", "review"} and tool_name in PREFLIGHT:
         return None
-    if (tool_name in DIRECT and turn["last_role"] == "interpret" and turn["phase"] == "interpret"
+    capture_allowed = (tool_name in DIRECT or learning.extension('task_capture').allowed(tool_name, args or {}))
+    if ((capture_allowed and tool_name in direct_tools(home, learning, turn) or completion_move(tool_name, args)) and turn["last_role"] == "interpret" and turn["phase"] == "interpret"
             and (not turn["case_id"] or turn.get("direct"))):
         turn["direct"] = True
         return _write_problem(tool_name, args, turn["observations"], learning)
@@ -293,7 +353,7 @@ def _write_problem(tool_name, args, receipts, learning):
     # Rollback's own consumed/remaining journal governs retries, including old unknown receipts.
     if uncertain and (tool_name != "personal_work_rollback"
                       or any(r["tool"] != "personal_work_rollback" for r in uncertain)):
-        return {"action":"block", "message":"앞선 쓰기의 반영 여부가 불명확하다. 원본 조회로 상태를 확인하고 A에 보고한다. 자동 재실행하지 않는다."}
+        return {"action":"block", "message":"앞선 쓰기의 반영 여부가 불명확하다. 원본 조회로 상태를 확인한 뒤 A가 team_work(resolve_uncertain)로 정리한다. 자동 재실행하지 않는다."}
     return None  # Existing permission and business idempotency checks still run.
 
 
@@ -342,10 +402,13 @@ def observe(home, learning, *, session_id, turn_id="", tool_name, args, result, 
     if (tool_name == "google_calendar_color_set" and payload.get("ok") is False
             and payload.get("mutation_calls") == 0):
         outcome = "failure"  # No patch was attempted; retry after reauthentication is safe.
-    if (tool_name == "contacts_direct_mutation" and payload.get("ok") is False
+    if (writing(tool_name, args or {})
+            and payload.get("ok") is False
             and type(payload.get("mutation_calls")) is int and payload["mutation_calls"] == 0
+            and (tool_name != "personal_work_bundle" or
+                 (type(payload.get("approval_calls")) is int and payload['approval_calls'] == 0))
             and payload.get("applied") is not True and not payload.get("execution_uncertain")):
-        outcome = "failure"  # Rejected before saving, or the native save transaction definitively failed.
+        outcome = "failure"  # Explicit zero-write refusals may be corrected without replaying an uncertain write.
     digest = learning.extension("learning_skills").digest
     row = {"tool_call_id": str(tool_call_id or digest([turn_id, tool_name, args, result])[:24]),
            "tool":tool_name, "status":outcome, "write":writing(tool_name, args or {}), "at":time.time(),
@@ -387,7 +450,7 @@ def _direct_record(home, learning, src, turn):
                     "created_at":time.time(), "receipts":list(turn["observations"][:-1]), "references":[], "progress":[],
                     "goal":request[:500], "scope":"선 작성 후 보고: 소유자 대화의 일정·미리알림 단건 쓰기",
                     "plan":["조회 후 바로 실행하고 결과로 답한다"], "done_when":["쓰기 도구가 성공을 반환한다"],
-                    "tools":sorted(DIRECT), "difficulty":"simple", "status":"executing", "direct":True,
+                    "tools":sorted(direct_tools(home, learning, turn)), "difficulty":"simple", "status":"executing", "direct":True,
                     "next_step":"결과 기록"}
             save(home, work, learning)
     turn["case_id"] = case_id
@@ -400,8 +463,12 @@ def _start(home, args, src, turn, learning):
         raise ValueError("Only A may define the execution scope. Ask for review first.")
     learning.validate_quote(src, args.get("user_said", ""))
     tools = args.get("tools", [])
+    # Read-only helpers that are never gated: drop them instead of failing the handoff and costing a
+    # whole model turn (2026-10-26). Anything else outside BUSINESS still fails, naming the tool.
+    tools = [t for t in tools if t not in UNGATED_READS] if isinstance(tools, list) else tools
     if not isinstance(tools, list) or len(tools) > 30 or any(t not in BUSINESS for t in tools):
-        raise ValueError("tools must name offered business tools, at most 30.")
+        bad = [t for t in tools if t not in BUSINESS] if isinstance(tools, list) else []
+        raise ValueError("tools must name offered business tools, at most 30." + (f" Not business tools: {bad}" if bad else ""))
     plan = strings(args.get("plan"), "plan")
     difficulty = args.get("difficulty", "normal")
     if difficulty not in {"simple", "normal", "complex"}:
@@ -426,8 +493,32 @@ def _start(home, args, src, turn, learning):
     turn.update(phase="execute", case_id=case_id, direct=False)
     if difficulty == "complex":
         turn["effort"] = "xhigh"
-    return {"ok":True, "handoff":public(work), "original_request":src["text"],
+    return {"ok":True, "handoff":public(work, detail=args.get("detail") is True), "original_request":src["text"],
             "approval":"No approval is transferred. Use the existing tool approval path for every action."}
+
+
+def _resolve_uncertain(work, args, turn):
+    if turn["last_role"] not in {"interpret", "review"}:
+        raise ValueError("Only A may resolve an uncertain write after reading the original.")
+    receipt = next((r for r in work["receipts"] if r["tool_call_id"] == args.get("receipt_id")), None)
+    if not receipt or receipt["write"] is not True or receipt["status"] not in {"unknown", "partial"}:
+        raise ValueError("receipt_id must identify an unknown or partial write in this checkpoint.")
+    outcome = args.get("outcome")
+    if outcome not in {"applied", "not_applied"}:
+        raise ValueError("Resolve as applied or not_applied.")
+    identifiers = args.get("evidence_ids")
+    if not isinstance(identifiers, list) or not identifiers or any(not isinstance(i, str) for i in identifiers):
+        raise ValueError("At least one successful lookup receipt is required.")
+    valid = {r["tool_call_id"] for r in work["receipts"]
+             if r["write"] is False and r["status"] == "success" and r["at"] > receipt["at"]}
+    if any(i not in valid for i in identifiers):
+        raise ValueError("Evidence must be successful reads after the uncertain write in this checkpoint.")
+    resolution = {"outcome": outcome, "evidence_ids": list(dict.fromkeys(identifiers)),
+                  "summary": text(args.get("summary"), "summary", 1500), "at": time.time(),
+                  "model": turn.get("last_route", {}).get("model", INTERPRETER)}
+    receipt.update(status="success" if outcome == "applied" else "failure", resolved=resolution)
+    work["progress"].append({"action": "resolve_uncertain", "receipt_id": receipt["tool_call_id"], **resolution})
+    return receipt
 
 
 def handle(home, args, *, learning, session_id="", turn_id="", **_):
@@ -454,8 +545,11 @@ def handle(home, args, *, learning, session_id="", turn_id="", **_):
             if project_scope and any(work["source"].get(k) != src.get(k) for k in ("chat_id", "thread_id")):
                 raise ValueError("This work belongs to another project thread.")
             if action == "read":
-                return json.dumps({"ok":True, "checkpoint":public(work), "hint":"Before resume, use common_work_get/kanban_show to refresh every referenced original. Past approvals do not transfer."}, ensure_ascii=False)
-            if action == "resume":
+                return json.dumps({"ok":True, "checkpoint":public(work, detail=args.get("detail") is True), "hint":"Before resume, use common_work_get/kanban_show to refresh every referenced original. Past approvals do not transfer."}, ensure_ascii=False)
+            resolved = None
+            if action == "resolve_uncertain":
+                resolved = _resolve_uncertain(work, args, turn)
+            elif action == "resume":
                 learning.validate_quote(src, args.get("user_said", ""))
                 if turn["last_role"] not in {"interpret", "review"} or work["status"] == "completed":
                     raise ValueError("A can resume only unfinished work after interpreting the new owner request.")
@@ -499,9 +593,14 @@ def handle(home, args, *, learning, session_id="", turn_id="", **_):
                                   "model":INTERPRETER, "tool_success_is_task_success":False}
                 turn["phase"] = "interpret"
             else:
-                raise ValueError("Use start/list/read/resume/checkpoint/review/finish/metrics.")
+                raise ValueError("Use start/list/read/resume/checkpoint/review/finish/resolve_uncertain/metrics.")
             save(home, work, learning)
-        return json.dumps({"ok":True, "checkpoint":public(work)}, ensure_ascii=False)
+            if resolved is not None:
+                # A's direct-write guard reads observations, B's guard reads receipts.
+                for observation in turn["observations"]:
+                    if observation["tool_call_id"] == resolved["tool_call_id"]:
+                        observation.update(status=resolved["status"], resolved=copy.deepcopy(resolved["resolved"]))
+        return json.dumps({"ok":True, "checkpoint":public(work, detail=args.get("detail") is True)}, ensure_ascii=False)
     except (OSError, ValueError, TypeError, KeyError) as exc:
         return json.dumps({"ok":False, "error":str(exc)}, ensure_ascii=False)
 
@@ -535,7 +634,7 @@ def request(home, learning, payload, *, turn_id="", **_):
     effort = "medium" if difficulty == "simple" else "xhigh" if difficulty == "complex" else "high"
     if turn and turn.get("effort") == "xhigh":
         effort = "xhigh"
-    # Per-profile opt-in; existing Jarvis/background effort selection is unchanged.
+    # Per-profile opt-in; existing assistant/background effort selection is unchanged.
     if role == "execute" and cfg.get("executor_effort") in {"low", "medium", "high", "xhigh", "max"}:
         effort = cfg["executor_effort"]
     result = copy.deepcopy(payload)
@@ -549,7 +648,7 @@ def request(home, learning, payload, *, turn_id="", **_):
         business = sorted(offered & BUSINESS)
         allowed = set(business)
         if role in {"interpret", "review"}:
-            allowed &= PREFLIGHT | (DIRECT if role == "interpret" else set())
+            allowed &= PREFLIGHT | (direct_tools(home, learning, turn) if role == "interpret" else set())
         elif role == "execute":
             allowed &= set(work["tools"])
         elif role == "simple":
@@ -609,10 +708,11 @@ def ended(home, learning, *, turn_id="", **_):
             save(home, work, learning)
 
 
-SCHEMA = {"name":"team_work", "description":"Handoff a verified owner request from interpretation to execution, checkpoint actual results, review, and resume existing work. Never transfers approval or executes business actions.",
+SCHEMA = {"name":"team_work", "description":"Handoff a verified owner request from interpretation to execution, checkpoint actual results, review, and resume existing work. A alone may resolve_uncertain with receipt_id, applied/not_applied, summary and successful read evidence_ids from after that write in the same case. Never transfers approval or executes business actions.",
           "parameters":{"type":"object", "properties":{
-              "action":{"type":"string", "enum":["start","list","read","resume","checkpoint","review","finish","metrics"]},
-              "case_id":{"type":"string"}, "user_said":{"type":"string"},
+              "action":{"type":"string", "enum":["start","list","read","resume","checkpoint","review","finish","resolve_uncertain","metrics"]},
+              "detail":{"type":"boolean","description":"Return all progress narratives and receipt rows; use read with detail=true when omitted steps matter."},
+              "receipt_id":{"type":"string"}, "case_id":{"type":"string"}, "user_said":{"type":"string"},
               "goal":{"type":"string","maxLength":500}, "scope":{"type":"string","maxLength":1000},
               "plan":{"type":"array","items":{"type":"string"},"maxItems":12},
               "done_when":{"type":"array","items":{"type":"string"},"maxItems":8},
@@ -620,5 +720,5 @@ SCHEMA = {"name":"team_work", "description":"Handoff a verified owner request fr
               "difficulty":{"type":"string","enum":["simple","normal","complex"]},
               "summary":{"type":"string","maxLength":1500}, "next_step":{"type":"string","maxLength":500},
               "evidence_ids":{"type":"array","items":{"type":"string"}},
-              "outcome":{"type":"string","enum":["completed","waiting","blocked"]}},
+              "outcome":{"type":"string","enum":["completed","waiting","blocked","applied","not_applied"]}},
               "required":["action"],"additionalProperties":False}}

@@ -18,9 +18,11 @@ from pathlib import Path
 
 COLORS = {'fail': '#E01E5A', 'warn': '#ECB22E', 'ok': '#2EB67D', 'info': '#1D9BD1', 'check': '#2EB67D', 'plain': '#9AA0A6'}
 # A section heading's words -> its bar colour; the first match wins.
+# Yellow means "answer received, still working" (owner, 2026-10-23/26): caution words in a section no
+# longer turn the bar yellow; only a title's 🟡/⚠️ mark does.
 SECTION_STATUS = (('fail', ('긴급', '중요도 높음', '실패', '오류', '장애', '위험', '차단')),
-                  ('warn', ('중요도 보통', '중요', '주의', '경고', '지연')),
-                  ('check', ('체크', '확인 필요', '확인할', '승인', '할 일', '결정', '답 필요', '답변 필요')))
+                  ('check', ('중요도 보통', '중요', '주의', '경고', '지연',
+                             '체크', '확인 필요', '확인할', '승인', '할 일', '결정', '답 필요', '답변 필요')))
 STATUS = (('fail', ('🔴', '❌', '🚨', '⛔', ':red_circle:', ':x:', ':rotating_light:')),
           ('warn', ('🟡', '⚠️', '⚠', '🟠', ':warning:', ':large_yellow_circle:', ':large_orange_circle:')),
           ('ok', ('🟢', '✅', ':large_green_circle:', ':white_check_mark:')),

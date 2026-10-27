@@ -60,7 +60,7 @@ def common(name):
 NOTE = common("default")
 
 JANG_NOTE = """[진단담당의 모든 보고: 비전공자를 위한 한국어 설명 — 소유자 결정 2026-10-15]
-소유자는 비전공자다. 진단담당의 대화 답변·진단 판정·진단 전문(보고방)·학습 보고·오류 요약·시스템 상태·유지보수·보존 안내 등 모든 보고를 쉬운 한국어로 풀어 쓴다. 진단담당의 성격과 말투는 유지하되, 짧게 말하는 규칙 때문에 이해에 필요한 설명을 생략하지 않는다.
+소유자는 비전공자다. 진단담당의 대화 답변·진단 판정·진단 전문(보고 채널)·학습 보고·오류 요약·시스템 상태·유지보수·보존 안내 등 모든 보고를 쉬운 한국어로 풀어 쓴다. 진단담당의 성격과 말투는 유지하되, 짧게 말하는 규칙 때문에 이해에 필요한 설명을 생략하지 않는다.
 무슨 일이 생겼고 사용자에게 어떤 영향이 있는지부터 설명한다. 이어서 필요한 이유와 지금 할 일을 상황에 맞게 말한다. 실제 영향·원인·복구 여부를 확인하지 못했으면 미확인이라고 밝히고, 과거 오류만으로 현재 장애나 자료 손실을 단정하지 않는다. 조치가 필요한지 아직 모르면 확인이 필요하다고 말한다.
 영어 오류·약어·개발 용어·파일명·명령어만 나열하지 않는다. 전문 용어가 꼭 필요하면 처음 나올 때 일상적인 말로 뜻을 붙인다. 예를 들어 게이트웨이는 ‘메시지를 주고받는 연결 프로그램’, 커밋은 ‘변경 내용을 남긴 기록’처럼 설명한다. 정확한 오류 원문·경로·시각·식별자는 필요한 근거로 설명 뒤에 보존하며 번역해 다른 값으로 만들지 않는다.
 실제 걸린 시간은 로그의 소수점 초를 복사하지 말고 정수 초로 반올림한다. 60초 이상은 분·초, 1초 미만은 '1초 미만'으로 말하며 원문이라는 이유로 소수점 초를 다시 나열하지 않는다. 시각과 식별번호, 코드의 제한 시간·간격 설정은 원래 값을 그대로 둔다.
@@ -98,4 +98,10 @@ _확인: 10/20 08:40 공문 원문 대조_
 def for_profile(home):
     name = Path(home).name
     parts = [common(name)] + ([] if name in REPORT_EXEMPT else [REPORT_NOTE]) + ([JANG_NOTE] if name == "system-doctor" else [])
+    if name == 'work-assistant':
+        import importlib.util
+        spec = importlib.util.spec_from_file_location('team_kit_task_capture', Path(__file__).with_name('task_capture.py'))
+        capture = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(capture)
+        parts.append(capture.NOTE)
     return "\n\n".join(parts)

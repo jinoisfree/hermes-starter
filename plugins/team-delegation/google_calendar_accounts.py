@@ -70,7 +70,7 @@ def event_row(value,account):
         'location':value.get('location',''),'notes':value.get('description',''),
         'url':value.get('htmlLink',''),'etag':value.get('etag'),
         'alarms':[r['minutes'] for r in value.get('reminders',{}).get('overrides',[]) if r.get('method')=='popup'],
-        'color_id':value.get('colorId','')}
+        'color_id':value.get('colorId',''), 'recurring':bool(value.get('recurrence') or value.get('recurringEventId'))}
 
 
 def lookup(td,args,context):
@@ -159,9 +159,16 @@ def mutation(td,args,context):
     payload={'calendarItemIdentifier':'google:'+(after or before)['id'],
         'before':event_row(before,cid) if before else None,'after':event_row(after,cid) if after else None}
     proc=SimpleNamespace(returncode=0,stdout=json.dumps(payload),stderr='')
-    return td._native_mutation_result('Google Calendar API',action,payload['calendarItemIdentifier'],proc,
-        common_work_domain='' if args.get('_skip_common_work') else 'calendar',
-        common_work_title=args.get('title') or (before or {}).get('summary',''),common_id=args.get('common_id',''))
+    from source_identity import verified_receipt
+    from contextlib import nullcontext
+    cfg,scope,_,_=selection(td,args,write=True)
+    row=payload['after']
+    identity = {'owner_scope':scope,'identity':{'title':row['title'],'start':row['start'],
+        'end':row['end'],'calendar_id':cid,'recurring':row['recurring'],'id_kind':'google'}} if row else None
+    with (verified_receipt('calendar',payload['calendarItemIdentifier'],identity) if identity else nullcontext()):
+        return td._native_mutation_result('Google Calendar API',action,payload['calendarItemIdentifier'],proc,
+            common_work_domain='' if args.get('_skip_common_work') else 'calendar',
+            common_work_title=args.get('title') or (before or {}).get('summary',''),common_id=args.get('common_id',''))
 
 
 def color(td,args,context,*,write):

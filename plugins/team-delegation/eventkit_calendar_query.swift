@@ -20,6 +20,16 @@ struct EventRow: Codable {
     let alarms: [Double]
     let alarmDetails: [AlarmRow]
     let conflict: Bool
+    // Zoom link in title/location/notes/URL; notes and URL themselves stay out of the output.
+    let zoomMeeting: Bool
+    let recurring: Bool
+    let writable: Bool
+}
+
+func isZoomMeeting(_ event: EKEvent) -> Bool {
+    let text = [event.title, event.location, event.notes, event.url?.absoluteString]
+        .compactMap { $0?.lowercased() }.joined(separator: "\n")
+    return text.contains("zoom.us") || text.contains("zoomgov.com") || (event.title ?? "").lowercased().contains("zoom")
 }
 
 struct CalendarRow: Codable {
@@ -139,7 +149,10 @@ struct CalendarQuery {
                     location: event.location,
                     alarms: (event.alarms ?? []).filter { $0.absoluteDate == nil }.map { -$0.relativeOffset / 60 },
                     alarmDetails: (event.alarms ?? []).map { AlarmRow(relativeOffset: $0.relativeOffset, absoluteDate: $0.absoluteDate.map { iso($0, timezone: timezone) }) },
-                    conflict: conflictIndexes.contains(index)
+                    conflict: conflictIndexes.contains(index),
+                    zoomMeeting: isZoomMeeting(event),
+                    recurring: event.hasRecurrenceRules,
+                    writable: event.calendar.allowsContentModifications
                 )
             }
             let calendarRows = calendars

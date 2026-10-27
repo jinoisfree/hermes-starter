@@ -28,7 +28,7 @@ def stores(home, base):
 
 def find(home, src, base):
     if src.get('user_id') != base.owner(home) or not base.learning.owner_report_place(home, src):
-        raise ValueError('소유자의 학원 보고 또는 DM 스레드에서만 검토할 수 있어.')
+        raise ValueError('소유자의 학습 채널 보고 또는 DM 스레드에서만 검토할 수 있어.')
     for store, loader in stores(home, base):
         for key, report in loader(home)['reports'].items():
             if (report.get('review_version') == 2 and report.get('thread_ts') == src.get('thread_id')

@@ -104,3 +104,13 @@ def post_dm(home, reports):
         except Exception:
             missed.append(report['fallback'])
     return missed
+
+
+def post_thread(home, channel, text, *, thread_ts=None, message_ts=None):
+    """Decision reports use the same rich-block sender and return their exact Slack receipt."""
+    body = {'channel':channel, 'text':text, 'unfurl_links':False}
+    if message_ts:
+        body['ts'] = message_ts
+    elif thread_ts:
+        body['thread_ts'] = thread_ts
+    return _sender().slack(home, 'chat.update' if message_ts else 'chat.postMessage', body)['ts']

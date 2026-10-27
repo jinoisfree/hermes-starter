@@ -19,7 +19,7 @@ _spec.loader.exec_module(base)
 learning, layout, KST = base.learning, base.layout, base.KST
 PLATFORM = "slack"
 ESSENTIAL = {"hermes-agent"}
-SETTING_REPO = Path(os.environ.get("HERMES_SETTING_REPO", str(Path.home() / "hermes-config"))).expanduser()
+SETTING_REPO = Path(os.environ.get("HERMES_SETTING_REPO", str(Path.home() / "workspace/Hermes-desktop-pet"))).expanduser()
 TEXT_LIMIT = DIFF_LIMIT = 6000
 
 

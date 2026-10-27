@@ -112,7 +112,7 @@ def catalog(config, profile, learning):
         if config.get('personal_roles', {}).get('scope_config'):
             roles['personal-secretary'] += ['calendar_direct_mutation', 'reminders_direct_mutation',
                                     'apple_notes_direct_mutation', 'personal_work_bundle', 'personal_work_rollback']
-        roles['work-assistant'] = reads + ['contacts_direct_lookup', 'contacts_direct_mutation', 'personal_work_bundle', 'personal_work_rollback',
+        roles['work-assistant'] = reads + ['task_reminders_sync', 'contacts_direct_lookup', 'contacts_direct_mutation', 'personal_work_bundle', 'personal_work_rollback',
                                      'google_calendar_color_set', 'common_work_complete',
                                      'work_crosscheck', 'mail_waiting', 'slack_history', 'deadline_watch']
         if profile == 'personal-secretary' and not config.get('personal_roles', {}).get('scope_config'):

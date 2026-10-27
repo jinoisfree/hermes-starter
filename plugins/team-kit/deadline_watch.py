@@ -15,7 +15,7 @@ from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
 KST = ZoneInfo("Asia/Seoul")
-CHANNEL = "REPLACE_SLACK_ID"  # 보고방 (2026-10-18); deadlines are still collected from #starter_user-world
+CHANNEL = "REPLACE_SLACK_ID"  # 보고 채널 (2026-10-18); deadlines are still collected from #starter_user-world
 REASONS = {"담당자 확인", "완료 근거 확인", "마감 경과", "취소"}
 
 
@@ -338,6 +338,9 @@ def handle(config, home, args, *, kind, session_id="", opener=None, **kwargs):
             spec = importlib.util.spec_from_file_location('team_deadline_reminders', Path(home) / 'plugins/team-delegation/deadline_reminders.py')
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
+            if args.get('source_kind') in {'notion', 'notes'}:
+                task_sync = module.module('deadline_task_reminders_sync', Path(home)/'plugins/team-delegation/task_reminders_sync.py')
+                return json.dumps(task_sync.sync(home, {'source_kind': args['source_kind'], 'source_id': args.get('source_id')}, config=auto), ensure_ascii=False)
             return json.dumps(module.ensure(home, args, auto), ensure_ascii=False)
         result = perform(home, args, mode=mode or "morning", opener=opener, session_id=session_id, turn_id=kwargs.get('turn_id',''), source_check=config.get('official_source_check') is True)
         if args.get("action") == "close" and result.get("ok"):
@@ -374,7 +377,7 @@ def note(home, info=None):
     return "\n".join(lines)
 
 
-SCHEMA = {"name": "deadline_watch", "description": "마감 기록 list/upsert/close/reply/reopen. ensure_reminder는 승인된 업무비서 마감 예약만 원본 재조회 후 실제 마감과 같은 시각의 미리알림을 생성·연결한다. 충돌·불확실 결과는 재시도하지 않고 보고한다. 허용된 마감 예약만 notify하며 고정 보고방 채널(REPLACE_SLACK_ID)에 코드가 계산한 단계별 한 번 발송한다(마감 수집 원문은 starter_user-world). 원문 자료는 저장하지 않는다.",
+SCHEMA = {"name": "deadline_watch", "description": "마감 기록 list/upsert/close/reply/reopen. ensure_reminder는 승인된 업무비서 마감 예약만 원본 재조회 후 실제 마감과 같은 시각의 미리알림을 생성·연결한다. 충돌·불확실 결과는 재시도하지 않고 보고한다. 허용된 마감 예약만 notify하며 고정 보고 채널(REPLACE_SLACK_ID)에 코드가 계산한 단계별 한 번 발송한다(마감 수집 원문은 starter_user-world). 원문 자료는 저장하지 않는다.",
     "parameters": {"type": "object", "additionalProperties": False, "required": ["action"], "properties": {
         "source_unavailable":{"type":"boolean","description":"공식 원문 접근 실패. 출처 미확인으로 남긴다."},
         "action": {"type": "string", "enum": ["list", "upsert", "notify", "close", "reply", "reopen", "source_check", "ensure_reminder"]},

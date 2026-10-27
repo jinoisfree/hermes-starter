@@ -1,4 +1,4 @@
-"""Send one requested inability report to the lead's configured Slack report channel (보고방)."""
+"""Send one requested inability report to the lead's configured Slack report channel (보고 채널)."""
 from __future__ import annotations
 
 import json
@@ -21,7 +21,7 @@ TITLE = "*🔴 못한 일 보고*"
 MAX_CHARS = 2000
 SCHEMA = {
     "name": "limit_report",
-    "description": ("Report an unfinished request to the configured Slack report channel (보고방) once. Every field is required and "
+    "description": ("Report an unfinished request to the configured Slack report channel (보고 채널) once. Every field is required and "
                     "written in your own voice without repeating its label; they are sent in order, each under "
                     "its fixed label (못한 일, 왜, 네가 해줄 것, 시스템에서 바꿀 것, 필요한 도구). In that channel, write "
                     "the same five labelled points in your reply instead. Never retry a failed or uncertain send."),
@@ -42,7 +42,7 @@ NUDGE = (
 def call(args: dict[str, Any], settings: dict[str, Any], *, platform: str, chat_id: str, sender=None) -> str:
     def failure(message: str) -> str:
         return json.dumps({"status": "failed", "sent": False, "error": message,
-                           "instruction": "재시도하지 말고 현재 답변에 보고 내용을 모두 담고 보고방 전송을 확인하지 못했다고 말하세요."}, ensure_ascii=False)
+                           "instruction": "재시도하지 말고 현재 답변에 보고 내용을 모두 담고 보고 채널 전송을 확인하지 못했다고 말하세요."}, ensure_ascii=False)
 
     if not isinstance(args, dict) or set(args) != set(FIELDS):
         return failure("Exactly these arguments are required: " + ", ".join(FIELDS))
@@ -57,7 +57,7 @@ def call(args: dict[str, Any], settings: dict[str, Any], *, platform: str, chat_
     report_chat_id = report_chat_id.strip()
     if platform.strip().lower() == "slack" and chat_id.strip() == report_chat_id:
         return json.dumps({"status": "ok", "sent": False,
-                           "instruction": "이미 지정된 보고방입니다. 보고 내용을 현재 답변에 담으세요."}, ensure_ascii=False)
+                           "instruction": "이미 지정된 보고 채널입니다. 보고 내용을 현재 답변에 담으세요."}, ensure_ascii=False)
     try:
         if sender is None:
             from tools.send_message_tool import send_message_tool

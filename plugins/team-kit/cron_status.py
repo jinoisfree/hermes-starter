@@ -15,7 +15,7 @@ FIELDS = ("id", "name", "enabled", "state", "schedule", "schedule_display", "rep
           "deliver", "failure_deliver")
 NOTE = ("[예약 상태 조회] 소유자가 예약 등록 여부·활성 상태·다음 실행·최근 결과를 물으면 "
         "cron_status(action='list') 또는 cron_status(action='get', job_id='예약 ID')로 현재 상태를 읽는다. "
-        "닥터아이 정기회의 초안은 업무비서 예약(bbf498cc15a0)이라 이 도구로 보이지 않는다. 1a932448f6da는 2026-10-17 이관 뒤 멈춘 옛 예약이다. 과거 대화·문서만 보고 확인을 Paseo에 떠넘기지 않는다. "
+        "과거 대화·문서만 보고 확인을 Paseo에 떠넘기지 않는다. "
         "next_run_at_kst는 저장된 예정 시각이며 실제 실행·전달 성공을 보장하지 않는다. "
         "last_run_at가 없으면 아직 실행 이력이 없다고 말한다. 새 예약·변경·수동 실행은 이 도구의 범위가 아니다.")
 

@@ -9,7 +9,7 @@ import sqlite3
 logger = logging.getLogger(__name__)
 
 BRIEFS = {
-    'morning_report': '학원·보고방의 아침 보고 스레드나 소유자 개인 DM에서 아침 보고를 다시 요청하면 morning_report로 저장된 보고를 읽는다(kind=all, view=summary). SNS담당는 학습·답장 보고를 함께 읽는다. 종류·새 서식을 되묻거나 재발송하지 않는다. 기록·전달 여부를 구분하고 상세·검토는 원래 보고 스레드에서 한다.',
+    'morning_report': '학습·보고 채널의 아침 보고 스레드나 소유자 개인 DM에서 아침 보고를 다시 요청하면 morning_report로 저장된 보고를 읽는다(kind=all, view=summary). SNS담당는 학습·답장 보고를 함께 읽는다. 종류·새 서식을 되묻거나 재발송하지 않는다. 기록·전달 여부를 구분하고 상세·검토는 원래 보고 스레드에서 한다.',
     'x_read': 'x_posts는 소유자 대화에서 공개 X 글·검색·타래를 읽는다. 최신 공지는 timeline만 보고 없다고 하지 말고 search(from:계정 since:날짜)·thread로 확인한다. 받은 날짜·조회 시각·캐시/잘림·최신성 한계를 밝히고 비공개 글은 읽지 않는다.',
 }
 

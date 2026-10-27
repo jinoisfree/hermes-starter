@@ -108,7 +108,7 @@ def locate(home, name):
                if p.parent.name == name and not any(x.startswith(".") for x in p.relative_to(root).parts)]
     if len(matches) > 1:
         raise ValueError("Multiple local skills have this name; resolve the duplicate first.")
-    category = settings(home).get("skill_folder", "jarvis")
+    category = settings(home).get("skill_folder", "assistant")
     if (not isinstance(category, str) or not category or category.startswith(".")
             or "/" in category or "\\" in category or "\x00" in category):
         raise ValueError("learning.skill_folder must be a single non-hidden folder name.")

@@ -1,6 +1,6 @@
 """Stand-in for Gmail: the same mailbox through the Mac Mail app.
 
-Used only when the Gmail API cannot be reached. Reads the inbox and sends an already approved
+Also used to watch configured company POP accounts. Reads the inbox and sends an already approved
 message from that account. Never moves, flags or deletes.
 """
 from __future__ import annotations
@@ -55,8 +55,20 @@ function run(argv) {
     return JSON.stringify({sent: message.send() === true, recipients: a.to.length + a.cc.length, attached: attached});
   }
 
+  function references(m) {
+    const headers = String(m.allHeaders() || "").slice(0, 65536).replace(/\r?\n[ \t]+/g, " ");
+    const result = [], seen = new Set();
+    for (const line of headers.split(/\r?\n/)) {
+      if (!/^(In-Reply-To|References):/i.test(line)) continue;
+      for (const id of (line.match(/<[^<>\s]{1,300}>/g) || [])) {
+        if (!seen.has(id.toLowerCase())) { seen.add(id.toLowerCase()); result.push(id); }
+        if (result.length >= 50) return result;
+      }
+    }
+    return result;
+  }
   const meta = m => ({id: "m" + m.id(), rfc_id: m.messageId(), from: m.sender(), subject: m.subject(),
-                      ts: Math.floor(m.dateReceived().getTime() / 1000)});
+                      ts: Math.floor(m.dateReceived().getTime() / 1000), references: references(m)});
   if (a.op === "read" || a.op === "download") {
     const hit = selected.flatMap(box => box.messages.whose({id: a.id})());
     if (!hit.length) return JSON.stringify({error: "MAIL_APP_NOT_FOUND"});
@@ -89,7 +101,8 @@ function run(argv) {
     if (a.since && row.ts < a.since) continue;
     if (row.from.toLowerCase().includes(a.account)) continue;
     if (!a.terms.every(t => (row.from+" "+row.subject).toLowerCase().includes(t))) continue;
-    items.push({id:row.id, from:row.from, subject:row.subject, ts:row.ts, rfc_id:row.message.messageId()});
+    items.push({id:row.id, from:row.from, subject:row.subject, ts:row.ts, rfc_id:row.message.messageId(),
+      references:references(row.message)});
   }
   return JSON.stringify({items: items});
 }
@@ -135,6 +148,10 @@ def _clean(item) -> dict:
               "ts": item["ts"], "snippet": "", "source": "mail_app"}
     if isinstance(item.get("rfc_id"), str) and item["rfc_id"]:
         result["rfc_id"] = item["rfc_id"]
+    refs = item.get("references", [])
+    if not isinstance(refs, list) or not all(isinstance(ref, str) for ref in refs):
+        raise MailAppError("MAIL_APP_INVALID_RESPONSE")
+    result["references"] = list(dict.fromkeys(ref for ref in refs[:50] if len(ref) <= 302))
     return result
 
 

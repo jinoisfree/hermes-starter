@@ -1,4 +1,4 @@
-"""Optional profile-local task skill routing; absent settings preserve Jarvis behavior."""
+"""Optional profile-local task skill routing; absent settings preserve assistant behavior."""
 from pathlib import Path
 from collections import OrderedDict
 import threading
@@ -6,8 +6,8 @@ import threading
 _CONFIG = OrderedDict()
 _LOCK = threading.RLock()
 
-DEFAULTS = {"personal": "jarvis-personal-work", "web": "jarvis-web-research",
-            "mail": "jarvis-mail", "work": "jarvis-task-workflow", "learn": "jarvis-learning"}
+DEFAULTS = {"personal": "assistant-personal-work", "web": "assistant-web-research",
+            "mail": "assistant-mail", "work": "assistant-task-workflow", "learn": "assistant-learning"}
 
 
 def settings(home):

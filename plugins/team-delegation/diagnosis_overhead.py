@@ -21,6 +21,7 @@ returned. Token counts are estimates (Hermes estimate_tokens_rough method).
 from __future__ import annotations
 
 from datetime import datetime
+import json
 import re
 import sqlite3
 import time
@@ -243,6 +244,25 @@ def first_call_inputs(diag, folder, session_ids):
     return found
 
 
+def first_call_breakdown(diag, folder, session_id):
+    """Sizes team-kit prompt_probe recorded for the session's first request (system prompt, tool schemas by toolset, messages)."""
+    path = folder / 'logs' / 'prompt_first_calls.jsonl'
+    if not path.exists():
+        return None
+    try:
+        lines = diag.read(path, [folder]).splitlines()
+    except (ValueError, OSError):
+        return None
+    for line in lines:
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(row, dict) and row.get('session_id') == session_id:
+            return row
+    return None
+
+
 def health(ratio_pct):
     return 'excellent' if ratio_pct < 5 else 'healthy' if ratio_pct < 15 else 'acceptable' if ratio_pct < 25 else 'unhealthy'
 
@@ -286,6 +306,21 @@ def profile_overhead(diag, profile, source, limit, top):
                                     'ratio_of_assumed_context_pct': round(100 * first / ASSUMED_CONTEXT, 1),
                                     'health': health(100 * first / ASSUMED_CONTEXT),
                                     'assumed_context_tokens': ASSUMED_CONTEXT}
+        probe = first_call_breakdown(diag, folder, newest['id'])
+        if probe is None:
+            result['first_api_call']['breakdown'] = None
+        else:
+            parts = probe['system_prompt']['tokens_est'] + probe['tools']['tokens_est'] + probe['messages']['tokens_est']
+            result['first_api_call']['breakdown'] = {
+                'system_prompt_tokens_est': probe['system_prompt']['tokens_est'],
+                'tool_schemas': {'tools': probe['tools']['tools'], 'tokens_est': probe['tools']['tokens_est'],
+                                 'share_of_measured_pct': round(100 * probe['tools']['tokens_est'] / first, 1) if first else None},
+                'tool_schemas_by_toolset': [{'toolset': name, 'tools': b['tools'], 'tokens_est': b['tokens_est'],
+                                             'largest_tools': b.get('largest', [])}
+                                            for name, b in list(probe['toolsets'].items())[:top]],
+                'toolsets_total': len(probe['toolsets']),
+                'messages': {'count': probe['messages']['count'], 'tokens_est': probe['messages']['tokens_est']},
+                'unattributed_tokens_est': first - parts}
     count = len(recent)
     def avg(key):
         return round(sum(r[key] or 0 for r in recent) / count) if count else None
@@ -329,4 +364,7 @@ def prompt_overhead(diag, args):
                      'per character, other text UTF-8 bytes/4) and is not a tokenizer count; input_tokens_measured '
                      'comes from the provider usage line in agent.log (API call #1); rest_tokens_est = measured minus prompt '
                      'estimate = tool schemas + first user message + request overhead. Tool schemas are not in the '
-                     'stored prompt. Health uses an assumed 200k context window (upstream default).')}
+                     'stored prompt; breakdown splits that first request into system prompt, tool schemas by toolset and messages '
+                     'from team-kit prompt_probe size records (logs/prompt_first_calls.jsonl, sizes and tool names only; null '
+                     'when the session predates the probe). unattributed_tokens_est = measured minus the three estimates '
+                     '(estimate error and request framing). Health uses an assumed 200k context window (upstream default).')}

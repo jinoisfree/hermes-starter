@@ -84,7 +84,7 @@ def guard(home, learning, *, args, session_id="", tool_call_id="", **_):
         return _block("이 조직원은 배경 스킬 학습이 꺼져 있다. 이번 돌아보기에서는 스킬을 바꾸지 않는다.")
     skills = learning.extension("learning_skills")
     config = skills.settings(home)
-    folder_name = config.get("skill_folder", "jarvis")
+    folder_name = config.get("skill_folder", "assistant")
     prefix = next((p for p in config.get("managed_prefixes", []) if p), "")
     args = args if isinstance(args, dict) else {}
     batch = isinstance(args.get("operations"), list)

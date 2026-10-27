@@ -25,6 +25,7 @@ import os
 import stat
 import uuid
 import json
+import mimetypes
 import re
 import urllib.error
 import urllib.parse
@@ -37,6 +38,7 @@ VERSION = "2022-06-28"
 UPLOAD_VERSION = "2026-03-11"
 _spec = importlib.util.spec_from_file_location("team_kit_notion_files", Path(__file__).with_name("files.py"))
 _files = importlib.util.module_from_spec(_spec); _spec.loader.exec_module(_files)
+ATTACH_BLOCKS = frozenset({'image', 'file'})
 IMAGE_MIME = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
               ".gif": "image/gif", ".webp": "image/webp", ".heic": "image/heic",
               ".tif": "image/tiff", ".tiff": "image/tiff"}
@@ -362,23 +364,23 @@ def _paragraphs(given: Any, uploads=None) -> list[dict]:
             if isinstance(item, str): item = {'text': item}
             if not isinstance(item, dict): raise NotionError('block needs text or an object')
             kind = item.get('type', 'paragraph')
-            if not isinstance(kind, str) or kind not in TEXT_BLOCKS | {'image', 'divider'}:
+            if not isinstance(kind, str) or kind not in TEXT_BLOCKS | ATTACH_BLOCKS | {'divider'}:
                 raise NotionError(f'unknown block type {kind!r}')
             keys = {'type'}
             if kind in TEXT_BLOCKS: keys |= {'text', 'color'}
             if kind in PARENT_BLOCKS: keys.add('children')
             if kind == 'to_do': keys.add('checked')
             if kind == 'callout': keys.add('icon')
-            if kind == 'image': keys |= {'path', 'caption'}
+            if kind in ATTACH_BLOCKS: keys |= {'path', 'caption'}
             if set(item) - keys: raise NotionError(f'unknown {kind} block keys: {sorted(set(item) - keys)}')
-            if kind == 'image':
-                if depth: raise NotionError('image는 최상위에만 둡니다.')
+            if kind in ATTACH_BLOCKS:
+                if depth: raise NotionError(f'{kind}는 최상위에만 둡니다.')
                 if not isinstance(item.get('path'), str) or not Path(item['path']).is_absolute():
-                    raise NotionError('image needs an absolute path')
+                    raise NotionError(f'{kind} needs an absolute path')
                 if not isinstance(item.get('caption', ''), str) or len(item.get('caption', '')) > 2000:
-                    raise NotionError('image caption must be a string of up to 2000 characters')
+                    raise NotionError(f'{kind} caption must be a string of up to 2000 characters')
                 images += 1
-                if images > 10: raise NotionError('사진은 호출당 10장까지 첨부합니다.')
+                if images > 10: raise NotionError('사진·파일은 호출당 10개까지 첨부합니다.')
                 content = {'type': 'file_upload', 'file_upload': {'id': (uploads or {}).get(item['path'], '')},
                            'caption': _text(item.get('caption'))}
             elif kind == 'divider': content = {}
@@ -403,7 +405,7 @@ def paragraph_lines(paragraphs, depth=0):
     lines = []
     for item in paragraphs:
         if isinstance(item, str): item = {'text': item}
-        if item.get('type') == 'image': continue
+        if item.get('type') in ATTACH_BLOCKS: continue
         text = item.get('text', '')
         if isinstance(text, list): text = ''.join(span['text'] for span in text)
         lines.extend('  ' * depth + line for line in normalized_lines(text))
@@ -533,7 +535,7 @@ def problem(args: dict[str, Any], config=None, files_config=None) -> str | None:
                     return f'{index}: batch permits create/update/append/edit/trash only'
                 if reason := problem(op, config, files_config): return f'{index}: {reason}'
             if sum(block_total(_paragraphs(op.get('paragraphs'))) for op in ops) > 100: return '하위 포함 전체 블록은 호출당 100개까지입니다. 나눠 보내세요.'
-            if sum(image_count(op) for op in ops) > 10: return '사진은 batch 전체 호출당 10장까지 첨부합니다.'
+            if sum(image_count(op) for op in ops) > 10: return '사진·파일은 batch 전체 호출당 10개까지 첨부합니다.'
             return None
         if action == 'rollback':
             if set(args) - {'action', 'key', '_approval_snapshot'} or ('key' in args and (not isinstance(args['key'], str) or not args['key'].strip())):
@@ -709,7 +711,7 @@ def note(config: Any) -> str:
     if writable(config) == set():
         return ("[Notion] 이 프로필은 Notion을 보기만 할 수 있다. 연결에 지정된 페이지에만 접근한다. "
                 "읽기: databases(목록), schema(열과 선택지), query(행 조회), page(한 항목의 속성과 본문), search, users. "
-                "jarvis-work-sources를 열어 조회 범위와 근거를 확인한다.")
+                "assistant-work-sources를 열어 조회 범위와 근거를 확인한다.")
     if config.get('full_api') is True:
         return ('[Notion] 연결에 공유된 모든 페이지·표에서 생성은 즉시, 수정은 먼저 실행하고 후보고, 삭제만 도구 승인을 받는다. '
                 'api_help로 공식 문서 API 46개와 입력 스키마를 찾고 api(operation, params, body)로 실행한다. '
@@ -722,7 +724,7 @@ def note(config: Any) -> str:
                 'rollback은 같은 대화의 최근 변경을 30분 안 복원하며 이후 24시간 안에는 확인을 받는다. 복원이 삭제를 수반하면 승인을 받는다. '
                 '동시 수정은 덮어쓰지 않고, 미확인 쓰기·비동기 작업은 성공으로 보고하거나 반복하지 않는다. '
                 'API에서 복원 불가한 원본 첨부·댓글/보기 삭제 등은 제한을 보고한다. 예약·배경 쓰기는 차단한다. '
-                'Notion 자체의 연결 공유·권한·요금제 제한은 API 오류를 근거로 알린다. hippo-notion 스킬을 참고한다.')
+                'Notion 자체의 연결 공유·권한·요금제 제한은 API 오류를 근거로 알린다. office-notion 스킬을 참고한다.')
     limited = ("" if writable(config) is None else
                " 만들거나 고칠 수 있는 곳은 설정에 지정된 표와 그 하위 항목뿐이고, 나머지는 보기만 한다. 범위 밖 변경은 도구가 거부하니 시도하지 말고 사용자에게 알린다.")
     allowed, config_error = _no_approval(config)
@@ -739,7 +741,7 @@ def note(config: Any) -> str:
         'paragraphs의 text는 문자열 또는 [{text,bold,italic,underline,strike,code,color,link}] 조각 목록이다. '
         '글자 크기는 heading_2·heading_3으로, callout(icon 이모지)·toggle·quote·divider·to_do와 color·children(하위 2단계)로 정리한다. '
         'edit(page_id, blocks=[{id,text?,checked?,color?}])는 20개까지. append(after=같은 페이지 최상위 블록 id)로 위치를 정한다. '
-        '사진은 {type:image,path:절대경로,caption:선택}로 최상위 10장까지. '
+        '사진은 {type:image,path:절대경로,caption:선택}, PDF·XLSX·DOCX·HWP 등 파일(메일 첨부 download 경로 포함)은 {type:file,path:절대경로,caption:선택}로 최상위 합계 10개까지(파일 20MB). '
         '기존 글·첨부를 보존하고 last_edited를 seen_last_edited로 넘긴다. 옛 메모의 마지막 ━ 5개 이상 구분선 아래 원문은 덧붙이기만 한다. '
         'update 글 칸은 {append:글}·{replace:{find,with}}를 쓴다. replace_all은 사용자가 그 건의 전체 재작성을 명시했을 때만 쓴다. '
         'report·verification·content_loss·attachment_loss를 보고하고 불명확한 쓰기는 재시도 전에 page로 확인한다. '
@@ -750,18 +752,18 @@ def note(config: Any) -> str:
 SCHEMA = {
     "name": "notion",
     "description": (
-        "Use batch(title, operations) for multiple changes and one tool approval; do not ask approval separately in prose. "
-        "rollback(key?) restores the latest change in this conversation: immediate within 30 minutes, confirmed key within 24 hours. "
-        "Preserve existing text and attachments. Pass page.last_edited as seen_last_edited; plaintext edits of nonempty text require it. "
-        "Original text below the last line with 5+ ━ must be kept; replace_all=true only for an explicitly requested full rewrite. "
-        "update text supports {append: text} or {replace: {find: text, with: text}}. Check verification and content_loss. "
-        "Read and, after the user approves, change the Notion pages and databases this profile's connection can reach. "
-        "Reading: action 'databases' | 'search' (query) | 'schema' (database_id) | 'query' (database_id, filter?, sorts?, "
-        "page_size<=50, cursor?) | 'page' (page_id) | 'users'. Changes: 'create' (database_id + properties for a new row, "
-        "or parent_page_id + title for a sub-page; paragraphs optional), 'update' (page_id + properties), "
-        "'append' (page_id + paragraphs, after? top-level block id), 'edit' (page_id + blocks, up to 20 text/checked/color changes), 'trash' (page_id). Ids may be Notion links. For photos, add {type: image, path: absolute local path, caption?: text} to paragraphs (up to 10). "
-        "Text spans support bold/italic/underline/strike/code/color/link; paragraphs support children (2 nested levels), callout/toggle/quote/divider. Use heading_2/heading_3 for text size. "
-        "Property values are plain: text, number, option name, list of option names, 'YYYY-MM-DD' or {start, end}, true/false, list of people names."),
+        "Use batch(title, operations) for multiple changes and one tool approval; no separate prose approval. "
+        "rollback(key?) restores this conversation's latest change: immediate within 30 minutes, confirmed key within "
+        "24 hours. Preserve text and attachments, including original text below the last line with 5+ ━. "
+        "replace_all=true requires an explicit full rewrite request. Pass page.last_edited as seen_last_edited for "
+        "plaintext edits of nonempty text. update text accepts {append: text} or {replace: {find: text, with: text}}. "
+        "Check verification and content_loss. Read and, after the user approves, change reachable Notion "
+        "pages/databases. Reads: databases, search(query), schema(database_id), query(database_id, filter?, sorts?, "
+        "page_size<=50, cursor?), page(page_id), users. Writes: create(database_id+properties or parent_page_id+title; "
+        "paragraphs?), update(page_id+properties), append(page_id+paragraphs, after? top-level block id), "
+        "edit(page_id+blocks, max20 text/checked/color changes), trash(page_id). IDs may be Notion links. Rich "
+        "paragraphs, images/files (max10), nesting and spans: see paragraphs parameter. Use heading_2/heading_3 for "
+        "text size. Properties: text, number, option name(s), YYYY-MM-DD or {start,end}, boolean, people names."),
     "parameters": {"type": "object", "properties": {
         "action": {"type": "string", "enum": sorted(READ | WRITE)},
         "database_id": {"type": "string"}, "page_id": {"type": "string"}, "parent_page_id": {"type": "string"},
@@ -773,7 +775,7 @@ SCHEMA = {
         "properties": {"type": "object", "description": "Property name to plain value."},
         "after": {"type": "string", "description": "append only: insert after this top-level block of the same page."},
         "blocks": {"type": "array", "minItems": 1, "maxItems": 20, "items": {"type": "object"}, "description": "edit only: {id, text?: string or spans, checked?: boolean (to_do), color?: Notion color}. No deletion, type changes or moves."},
-        "paragraphs": {"description": "Strings or {type,text: string or [{text,bold,italic,underline,strike,code,color,link}],color?,children?}. Types: paragraph, heading_1/2/3 (text size), bulleted_list_item, numbered_list_item, to_do(checked), quote, callout(icon emoji), toggle, divider(no text). Max 50 top-level, 100 total, 2 nested levels. Notion colors only; http/https links. Top-level images or {type: image, path: absolute local path, caption?: text}; up to 10 images. Images require enabled files and allowed paths, user approval.", "type": "array", "maxItems": MAX_PARAGRAPHS, "items": {}},
+        "paragraphs": {"description": "Strings or {type,text: string or [{text,bold,italic,underline,strike,code,color,link}],color?,children?}. Types: paragraph, heading_1/2/3 (text size), bulleted_list_item, numbered_list_item, to_do(checked), quote, callout(icon emoji), toggle, divider(no text). Max 50 top-level, 100 total, 2 nested levels. Notion colors only; http/https links. Top-level {type: image|file, path: absolute local path, caption?: text}; up to 10 photos/files. Requires enabled files and allowed paths (mail attachment downloads included).", "type": "array", "maxItems": MAX_PARAGRAPHS, "items": {}},
         "filter": {"type": "object"}, "sorts": {"type": "array", "items": {"type": "object"}},
         "page_size": {"type": "integer", "minimum": 1, "maximum": MAX_ROWS}, "cursor": {"type": "string"},
     }, "required": ["action"]},
@@ -803,29 +805,52 @@ def schema(config: Any) -> dict:
 
 
 def image_count(args):
-    return sum(isinstance(i, dict) and i.get('type') == 'image' for i in args.get('paragraphs', []) or [])
+    """Photos and files attached by this call (both are uploads shown as attachments)."""
+    return sum(isinstance(i, dict) and i.get('type') in ATTACH_BLOCKS for i in args.get('paragraphs', []) or [])
+
+
+def attachment_label(args):
+    files = any(isinstance(i, dict) and i.get('type') == 'file' for i in args.get('paragraphs', []) or [])
+    count = len(attachment_names(args))
+    return f'사진·파일 {count}개' if files else f'사진 {count}장'
+
+
+def attachment_names(args):
+    return [Path(i['path']).name for i in args.get('paragraphs', []) or []
+            if isinstance(i, dict) and i.get('type') in ATTACH_BLOCKS and isinstance(i.get('path'), str)]
+
+
+def _size_limit(config, key, default):
+    maximum = (config or {}).get(key, default)
+    if isinstance(maximum, bool) or not isinstance(maximum, (float, int)) or not 0 < maximum <= 20:
+        raise NotionError(f'notion.{key}는 0 초과 20 이하이어야 합니다(single-part 한도).')
+    return maximum, int(maximum * 1024 * 1024)
+
+
+def file_mime(path):
+    return IMAGE_MIME.get(path.suffix.lower()) or mimetypes.guess_type(path.name)[0] or 'application/octet-stream'
 
 
 def image_files(args, config, files_config):
-    pictures = [i for i in args.get('paragraphs', []) or [] if isinstance(i, dict) and i.get('type') == 'image']
+    pictures = [i for i in args.get('paragraphs', []) or [] if isinstance(i, dict) and i.get('type') in ATTACH_BLOCKS]
     if not pictures: return []
     if not isinstance(files_config, dict) or files_config.get('enabled') is not True:
-        raise NotionError('사진 첨부에는 files 설정이 켜져 있어야 합니다.')
-    maximum = (config or {}).get('max_image_mb', 5)
-    if isinstance(maximum, bool) or not isinstance(maximum, (float, int)) or not 0 < maximum <= 20:
-        raise NotionError('notion.max_image_mb는 0 초과 20 이하이어야 합니다(single-part 한도).')
-    limit = int(maximum * 1024 * 1024)
+        raise NotionError('사진·파일 첨부에는 files 설정이 켜져 있어야 합니다.')
     roots = _files.folders(files_config) + [_files.attachments(), _files.renders()]
     found = []
     for item in pictures:
+        photo = item.get('type') == 'image'
+        maximum, limit = _size_limit(config, 'max_image_mb', 5) if photo else _size_limit(config, 'max_file_mb', 20)
+        label = '사진' if photo else '파일'
         path = _files.inside(item.get('path'), roots)
-        if path is None: raise NotionError('사진 경로가 허용된 파일 범위 밖입니다.')
-        if path.suffix.lower() not in IMAGE_MIME: raise NotionError('허용되지 않은 사진 확장자입니다.')
+        if path is None: raise NotionError(f'{label} 경로가 허용된 파일 범위 밖입니다.')
+        if photo and path.suffix.lower() not in IMAGE_MIME: raise NotionError('허용되지 않은 사진 확장자입니다.')
         try:
             info = path.stat()
             if not stat.S_ISREG(info.st_mode) or not 0 < info.st_size <= limit:
-                raise NotionError(f'{path.name}: 사진 크기 한도 {maximum}MB를 넘었거나 일반 파일이 아닙니다.')
-        except OSError: raise NotionError(f'{path.name}: 사진 파일을 읽지 못했습니다.') from None
+                raise NotionError(f'{path.name}: {label} 크기 한도 {maximum}MB를 넘었거나 일반 파일이 아닙니다. '
+                                  '더 큰 파일은 api upload-file(multi_part)로 나눠 올립니다.')
+        except OSError: raise NotionError(f'{path.name}: {label} 파일을 읽지 못했습니다.') from None
         found.append((item, path, limit, roots))
     return found
 
@@ -845,8 +870,8 @@ def upload_images(home, args, config, files_config, opener):
             with os.fdopen(source, 'rb') as stream:
                 if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode): raise NotionError('일반 파일이 아닙니다.')
                 raw = stream.read(limit + 1)
-            if not 0 < len(raw) <= limit: raise NotionError('사진 크기가 바뀌어 한도를 넘었습니다.')
-            mime = IMAGE_MIME[path.suffix.lower()]
+            if not 0 < len(raw) <= limit: raise NotionError('첨부 크기가 바뀌어 한도를 넘었습니다.')
+            mime = file_mime(path)
             created = request(home, 'POST', 'file_uploads', {'mode': 'single_part', 'filename': path.name, 'content_type': mime}, opener=opener)
             upload_id = object_id(created.get('id'))
             boundary = 'hermes' + uuid.uuid4().hex
@@ -858,7 +883,7 @@ def upload_images(home, args, config, files_config, opener):
             if sent.get('status') != 'uploaded': raise NotionError('업로드 완료 상태를 확인하지 못했습니다.')
             uploads[item['path']] = upload_id
         except (NotionError, OSError) as exc:
-            error = NotionError(f'{path.name}: 사진 업로드 실패 ({exc}). 본문은 보내지 않았습니다.')
+            error = NotionError(f'{path.name}: 첨부 업로드 실패 ({exc}). 본문은 보내지 않았습니다.')
             error.unknown = getattr(exc, 'unknown', False) or isinstance(exc, OSError)
             raise error from None
     return uploads
@@ -1210,7 +1235,7 @@ def preview(op, plan):
         shown = str(count) + '개' if count is not None else '개수 미확인'
         line = f"{target}: 사진·파일 {shown}가 있는 항목을 휴지통으로 옮깁니다.\n휴지통은 복구 가능하며 rollback 대상입니다."
     if action == 'create' and op.get('paragraphs'): line += f"\n본문 {len(op['paragraphs'])}개 포함"
-    images = [Path(i['path']).name for i in op.get('paragraphs', []) or [] if isinstance(i, dict) and i.get('type') == 'image']
+    images = attachment_names(op)
     line = line[:700] + ("…" if len(line) > 700 else "")
     for name, change in plan.get('text_checks', {}).items():
         if change['missing']:
@@ -1219,7 +1244,7 @@ def preview(op, plan):
     for name, transition in plan.get('transitions', {}).items():
         line += f'\n{name}: {transition[:240]}'
     if body_lines := paragraph_lines(op.get('paragraphs') or []): line += '\n추가한 본문:\n' + loss_preview(body_lines)
-    if images: line += f"\n사진 {len(images)}장: " + ', '.join(images)
+    if images: line += f"\n{attachment_label(op)}: " + ', '.join(images)
     if plan.get('url'): line += '\n' + plan['url']
     return line + ('\n' + '\n'.join(plan['warnings']) if plan['warnings'] else '')
 
@@ -1249,8 +1274,8 @@ def report(op, plan, result):
             transition = plan.get('transitions', {}).get(name, f"없음 → {value({'type': kind, **prop})}")
             lines.append(f'{name}: {transition}')
     paragraphs = op.get('paragraphs') or []
-    images = [Path(p['path']).name for p in paragraphs if isinstance(p, dict) and p.get('type') == 'image']
-    lines.append(f'덧붙인 본문 블록 {len(paragraphs)}개 · 사진 {len(images)}장' + (': ' + ', '.join(images) if images else ''))
+    images = attachment_names(op)
+    lines.append(f'덧붙인 본문 블록 {len(paragraphs)}개 · {attachment_label(op)}' + (': ' + ', '.join(images) if images else ''))
     body_lines = paragraph_lines(paragraphs)
     if action == 'edit': lines.extend(edit_report(plan, result.get('edited', [])))
     if body_lines: lines.append('추가한 본문:\n' + loss_preview(body_lines))
@@ -1343,7 +1368,7 @@ def verification(home, page_id, expected, block_ids, opener, *, new_page=False, 
                 blocks = [request(home, 'GET', 'blocks/' + ident, opener=opener) for ident in block_ids]
                 if any(b.get('archived') or b.get('in_trash') or not b.get('type') for b in blocks): return result
             else: return result
-            result.update(blocks=len(blocks), images=sum(b.get('type') == 'image' for b in blocks))
+            result.update(blocks=len(blocks), images=sum(b.get('type') in ATTACH_BLOCKS for b in blocks))
             result.update(blocks_match=result['blocks'] == block_count, images_match=result['images'] == images)
     except (NotionError, KeyError, TypeError) as exc: result['error'] = str(exc)
     return result

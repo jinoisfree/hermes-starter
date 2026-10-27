@@ -523,10 +523,15 @@ def _pre_tool_call(tool_name: str = "", args: Any = None, session_id: str = "", 
         except Exception as exc:
             logger.warning("team-kit %s guard failed: %s", guard_name, type(exc).__name__)
             return {"action":"block", "message":"작업 인계·원문 범위를 확인하지 못했다. 실제 사용자 요청과 저장 상태를 확인한다."}
-    if approval is not None:
-        return approval
-    if policy_result is not None:
-        return policy_result
+    decision = approval if approval is not None else policy_result
+    if decision is not None:
+        if isinstance(args, dict):
+            from hermes_constants import get_hermes_home
+            from importlib.util import spec_from_file_location, module_from_spec
+            spec = spec_from_file_location('team_kit_request_plan', Path(__file__).with_name('request_plan.py'))
+            plans = module_from_spec(spec); spec.loader.exec_module(plans)
+            return plans.gate(Path(get_hermes_home()), tool_name, args, decision, dict(context, session_id=session_id))
+        return decision
     try:
         configured = _PLUGIN_CONTEXT.get_config("learning", {}) if _PLUGIN_CONTEXT else {}
         if (tool_name != "memory" or not isinstance(configured, dict)
@@ -724,10 +729,10 @@ def _news_watch_note(config, room=None) -> str:
             if not isinstance(source.get('account'), str) or not isinstance(topics, list) or not all(isinstance(t, str) for t in topics): return ''
             lines.append(f"X @{source['account']}: {' · '.join(topics)} / 계정당 {period}")
     # Mirrors news_watch.report_room: the owner report room (team-kit.settings.report_channel), else the owner's DM.
-    place = (f'보고방 채널(<#{room}>)' if isinstance(room, str) and re.fullmatch(r'[CG][A-Z0-9]+', room)
+    place = (f'보고 채널(<#{room}>)' if isinstance(room, str) and re.fullmatch(r'[CG][A-Z0-9]+', room)
              else '소유자 개인 DM')
     end = (f'\n알림은 감시 프로그램이 {place}으로 직접 보낸다. SNS담당는 이 설정을 바꿀 수 없고 '
-           '변경은 Paseo hermes-config에서 한다. 설정이 바뀌면 이 안내도 바뀐다.')
+           '변경은 Paseo Hermes-desktop-pet에서 한다. 설정이 바뀌면 이 안내도 바뀐다.')
     body = '\n'.join(lines)
     return (body[:800-len(end)-1] + '…' if len(body)+len(end)>800 else body) + end
 
@@ -875,7 +880,7 @@ def _register_personal_read(ctx, name) -> None:
 
 
 def _register_reviews(ctx):
-    """Only the three selected profiles expose reports; Jang Chen uses diagnosis tools."""
+    """Only the three selected profiles expose reports; system-doctor uses diagnosis tools."""
     configured = ctx.get_config('review_tools', {})
     if not isinstance(configured, dict) or configured.get('enabled') is not True:
         return
@@ -923,6 +928,8 @@ def _register_projects(ctx):
     if home.name == 'system-doctor':
         # 조직개편안 lives in the owner's DM with 진단담당; its thread replies are handled by org_review.poll.
         ctx.register_hook('pre_gateway_dispatch', partial(learning.extension('org_review').skip_report_thread, home))
+        if ctx.get_config('starter_plugins', {}).get('enabled') is True:
+            ctx.register_hook('pre_gateway_dispatch', partial(learning.extension('starter_plugins').skip_report_thread, home))
     ctx.register_hook('post_gateway_admission', partial(dispatcher.admitted, home, learning))
     ctx.register_hook('pre_api_request', partial(learning.extension('project_capabilities').offered, home, learning))
     ctx.register_middleware('llm_request', partial(learning.extension('project_consult').filter_request, home, learning))
@@ -962,6 +969,39 @@ def _register_report_status(ctx):
     ctx.register_tool(name='report_status', toolset='team-kit', schema=status.SCHEMA,
                       handler=partial(status.handle, Path(get_hermes_home()), base=base),
                       description='Repaint an approval report after its work is done.', emoji='🟢')
+
+
+def _register_prompt_probe(ctx):
+    """Sizes of each turn's first request by toolset, read by diagnosis_prompt_overhead_read."""
+    import importlib.util
+    from functools import partial
+    from hermes_constants import get_hermes_home
+    spec = importlib.util.spec_from_file_location('team_kit_prompt_probe', Path(__file__).with_name('prompt_probe.py'))
+    probe = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(probe)
+    ctx.register_middleware('llm_request', partial(probe.record, Path(get_hermes_home())))
+
+
+
+def _register_wait(ctx) -> None:
+    """조건 대기 (2026-10-27 사용자 결정): 업무비서·개인비서 소유자 대화에서만."""
+    configured = ctx.get_config("wait", {})
+    if not isinstance(configured, dict) or configured.get("enabled") is not True:
+        return
+    import importlib.util
+    from hermes_constants import get_hermes_home
+    home = Path(get_hermes_home())
+    spec = importlib.util.spec_from_file_location("team_kit_wait_jobs", Path(__file__).with_name("wait_jobs.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    if home.name not in module.PROFILES:
+        return
+    ctx.register_tool(name="team_wait", toolset="team-kit", schema=module.SCHEMA,
+                      handler=lambda args, **kwargs: module.handle(ctx.get_config("wait", {}), home, args,
+                                                                  kind=_run_kind(), **kwargs),
+                      description=module.SCHEMA["description"], emoji="⏳")
+    ctx.register_system_prompt_section("team-kit.wait",
+        lambda *_, **__: module.NOTE if _run_kind() == "chat" else "", max_chars=900)
 
 
 def register(ctx) -> None:
@@ -1032,6 +1072,10 @@ def register(ctx) -> None:
         _register_reviews(ctx)
     except Exception:
         logger.exception('team-kit review tools registration failed')
+    try:
+        _register_wait(ctx)
+    except Exception:
+        logger.exception("team-kit wait registration failed")
     for name in ("mail_read", "calendar_read", "notes_read", "reminders_read"):
         try:
             _register_personal_read(ctx, name)
@@ -1039,6 +1083,10 @@ def register(ctx) -> None:
             logger.exception("team-kit %s registration failed", name)
     ctx.flush()
     ctx = ctx.ctx
+    try:
+        _register_prompt_probe(ctx)
+    except Exception:
+        logger.exception('team-kit prompt probe registration failed')
     ctx.register_hook("pre_llm_call", _pre_llm_call)
     ctx.register_hook("pre_tool_call", _pre_tool_call)
     if _NOTION is not None:

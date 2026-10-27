@@ -1,10 +1,10 @@
-"""Owner-requested idea/private report to the one configured Jarvis DM, never arbitrary recipients."""
+"""Owner-requested idea/private report to the one configured assistant DM, never arbitrary recipients."""
 import hashlib
 import json
 import re
 import threading
 
-SCHEMA = {'name':'personal_report','description':'Only when the owner explicitly asks to send it to the Jarvis DM, deliver an AI-idea or private-life result there; otherwise answer in the current conversation (starter_user-world: that thread). A successful DM response in that same DM needs no duplicate call. The message must start with a `# title` line (no status icon; the section headings set the bar colours).',
+SCHEMA = {'name':'personal_report','description':'Only when the owner explicitly asks to send it to the assistant DM, deliver an AI-idea or private-life result there; otherwise answer in the current conversation (starter_user-world: that thread). A successful DM response in that same DM needs no duplicate call. The message must start with a `# title` line (no status icon; the section headings set the bar colours).',
  'parameters':{'type':'object','properties':{'message':{'type':'string'}},'required':['message'],'additionalProperties':False}}
 # `# 제목` becomes the Slack header block; `*…*` would render as italics. Since 2026-10-19 the status is the bar
 # colour of each section, so the title needs no status icon (an old one is still accepted).

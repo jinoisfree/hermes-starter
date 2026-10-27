@@ -11,6 +11,9 @@ import difflib
 import fcntl
 import importlib.util
 import json
+import logging
+from logging.handlers import RotatingFileHandler
+import traceback
 import os
 from pathlib import Path
 import re
@@ -22,10 +25,92 @@ from datetime import datetime, timedelta, timezone
 from common_work_links import CommonWorkStore
 import deadline_time
 import deadline_link_sync
+import title_link_sync
 
 DATABASE = ''
 DUE = '다음 마감'
 SEOUL = None  # set lazily (zoneinfo import is slow in tests)
+
+
+# Only these fixed codes may leave the exception boundary; never log exception text.
+WORK_ERROR_REASONS = {
+    'single_original_per_domain_required': '같은 종류의 원본이 여러 개 연결돼 있어요',
+    'single_nonrecurring_calendar_original_required': '일정이 없거나 반복 일정이라 처리 대상이 아니에요',
+    'PERSONAL_SCOPE_UNVERIFIED': '회사 범위인지 확인할 수 없어요',
+    'personal_scope_denied': '개인 범위는 개인비서 담당이에요',
+    'company_notion_database_required': '회사 업무 노션 데이터베이스가 아니에요',
+    'unsupported_work_source': '지원하지 않는 원본 종류예요',
+    'linked_task_sources_conflict': '연결된 원본의 할 일 내용이 서로 달라요',
+    'ambiguous_task_deadline': '할 일의 마감 날짜가 불명확해 소유자 확인이 필요해요',
+    'note_structure_preserved': '구역이 나뉜 메모라 할 일 완료 표시 말고는 다른 원본의 변경을 옮기지 않았어요',
+    'reminder_read_failed': '미리알림을 읽지 못했어요',
+    'title_write_pending': '제목 반영 확인이 필요해 멈췄어요. 자동 재실행하지 않아요',
+    'unknown_error': '분류되지 않은 오류가 반복됐어요. 로컬 로그 확인이 필요해요',
+}
+NON_TARGET_REASONS = frozenset(WORK_ERROR_REASONS) - {
+    'linked_task_sources_conflict', 'ambiguous_task_deadline', 'reminder_read_failed', 'unknown_error', 'title_write_pending'}
+TRANSIENT_REASONS = {'reminder_read_failed', 'unknown_error'}
+
+
+CONTENT_WARNINGS = {  # work_sync.Engine warning lines -> fixed reason codes for 진단담당
+    '본문·할 일 반영 확인이 필요해 멈췄어요': 'work_content_write_uncertain',
+    '앞선 본문·할 일 반영이 불명확해': 'work_content_pending_uncertain',
+    '두 원본이 서로 다르게 바뀌었어요': 'work_content_conflict',
+}
+
+
+def content_warning_code(line):
+    return next((code for text, code in CONTENT_WARNINGS.items() if text in line), None)
+
+
+def request_warning_diagnosis(common_id, reason):
+    """Bounded program call to 진단담당 (team-kit diagnosis_requests); None means tell the owner directly."""
+    try:
+        script = Path(__file__).resolve().parents[1] / 'team-kit/diagnosis_requests.py'
+        values = {'kind': 'work_watch_warning', 'common_id': common_id, 'error_type': reason,
+                  'failures': 1, 'since': time.time()}
+        result = subprocess.run([sys.executable, str(script), '--program-request'], input=json.dumps(values),
+                                text=True, capture_output=True, timeout=10)
+        response = json.loads(result.stdout)
+        return response.get('request_id') if response.get('ok') else None
+    except Exception:
+        return None
+
+
+def diagnosis_status(root, request_id):
+    try:
+        row = json.loads((Path(root) / 'shared/diagnosis-requests' / f'{request_id}.json').read_text())
+        return str(row.get('status') or 'missing')
+    except (OSError, ValueError):
+        return 'missing'
+
+
+def work_error_reason(exc):
+    message = str(exc)
+    if message == "개인 범위는 개인비서 담당('ㅈ'으로 요청)":
+        return 'personal_scope_denied'
+    code = message.split(':', 1)[0].strip()
+    return code if code in WORK_ERROR_REASONS else 'unknown_error'
+
+
+def log_work_error(home, cid, reason, exc, *, frames=None, exception_type=None):
+    # Frames only: format_exception would expose messages, source lines and chained data.
+    frames = frames if frames is not None else [{'file': Path(frame.filename).name, 'line': frame.lineno, 'function': frame.name}
+              for frame in traceback.extract_tb(exc.__traceback__)]
+    record = json.dumps({'cid': cid, 'reason': reason, 'exception': exception_type or type(exc).__name__,
+                         'traceback': frames}, ensure_ascii=False)
+    try:
+        path = home / 'logs/notion-completion-sync.log'
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handler = RotatingFileHandler(path, maxBytes=1024 * 1024, backupCount=3, encoding='utf-8')
+        try:
+            handler.setFormatter(logging.Formatter('%(asctime)s %(message)s'))
+            handler.emit(logging.LogRecord('work-sync', logging.ERROR, '', 0, record, (), None))
+        finally:
+            handler.close()
+    except OSError:
+        # Logging must not stop other work or send sensitive data to cron stdout.
+        pass
 
 
 def seoul():
@@ -104,6 +189,14 @@ def save(path, state):
     temp.replace(path)
 
 
+def page_title(page):
+    found = [(name, value) for name, value in page.get('properties', {}).items() if 'title' in value]
+    if len(found) != 1:
+        raise ValueError('single Notion title property required')
+    name, value = found[0]
+    return name, ''.join(v.get('plain_text', v.get('text', {}).get('content', '')) for v in value['title'])
+
+
 class NotionReader:
     def __init__(self, home):
         self.home = home
@@ -136,6 +229,16 @@ class NotionReader:
     def set_due(self, identifier, day):
         return self.request('PATCH', f'pages/{identifier}', {'properties': {DUE: {'date': {'start': day}}}})
 
+    def set_title(self, identifier, expected, title):
+        before = self.page(identifier)
+        if (page_id(before.get('parent', {}).get('database_id', '')) != DATABASE or before.get('in_trash')
+                or before.get('archived') or page_title(before)[1] != expected):
+            raise ValueError('Notion title identity/scope changed')
+        name, _ = page_title(before)
+        self.request('PATCH', f'pages/{identifier}', {'properties': {name: {'title': [{'text': {'content': title}}]}}})
+        if page_title(self.page(identifier))[1] != title:
+            raise RuntimeError('Notion title verification failed')
+
     def blocks(self, identifier):
         result, stack, seen = [], [identifier], set()
         while stack:
@@ -159,13 +262,15 @@ class NotionReader:
         return result
 
 
-def company_scope_guard(domain, args):
+def company_scope_guard(domain, args, *, strict=False):
     """The existing background-write exception covers company originals only."""
     import hermes_yaml
     from types import SimpleNamespace
     root = Path.home() / '.hermes'
     shared = hermes_yaml.safe_load((root / 'config.yaml').read_text())['plugins']['entries']['team-kit']['settings'].get('personal_scopes')
     if not shared or shared.get('enabled') is not True:
+        if strict:
+            raise ValueError('company title scope unavailable')
         return
     tools = load_module('_company_scope_sync', Path(__file__).with_name('__init__.py'))
     settings = hermes_yaml.safe_load((HOME / 'config.yaml').read_text())['plugins']['entries']['team-delegation']['settings']
@@ -179,16 +284,8 @@ class Reminders:
         self.rows = None
 
     def all(self):
-        if self.rows is None:
-            proc = subprocess.run(['remindctl', 'show', 'all', '--json', '--no-input', '--no-color'],
-                                  capture_output=True, text=True, timeout=30)
-            if proc.returncode:
-                raise RuntimeError('reminder read failed')
-            rows = json.loads(proc.stdout)
-            if isinstance(rows, dict):
-                rows = rows.get('reminders', rows.get('items', []))
-            self.rows = rows
-        return self.rows
+        import reminder_reads
+        return reminder_reads.all(subprocess.run)
 
     def set_due(self, identifier, value):
         company_scope_guard('todo', {'action': 'update', 'reminder_id': identifier})
@@ -204,12 +301,21 @@ class Reminders:
             raise RuntimeError('reminder due/alarm verification failed')
 
     def current(self, identifier):
-        self.rows = None
-        rows = self.all()
-        matches = [row for row in rows if str(row.get('id', '')).lower().startswith(identifier.lower())]
-        if not identifier or len(matches) != 1 or not isinstance(matches[0].get('isCompleted'), bool):
+        import reminder_reads
+        row = reminder_reads.one(identifier, subprocess.run)
+        if row is None or not isinstance(row.get('isCompleted'), bool):
             raise RuntimeError('reminder identity/state ambiguous')
-        return matches[0]
+        return row
+
+    def rename(self, identifier, expected, title):
+        company_scope_guard('todo', {'action': 'update', 'reminder_id': identifier}, strict=True)
+        if self.current(identifier).get('title') != expected:
+            raise ValueError('reminder title changed')
+        proc = subprocess.run(['remindctl', 'edit', identifier, '--title', title, '--json', '--no-input', '--no-color'],
+                              capture_output=True, text=True, timeout=30)
+        self.rows = None
+        if proc.returncode or self.current(identifier).get('title') != title:
+            raise RuntimeError('reminder title verification failed')
 
     def complete(self, identifier):
         company_scope_guard('todo', {'action': 'complete', 'reminder_id': identifier})
@@ -231,8 +337,22 @@ class Calendar:
             self.plugin = load_module('_linked_calendar_tools', Path(__file__).with_name('__init__.py'))
         return self.plugin
 
+    def lookup(self, identifier):
+        return self.tools()._calendar_event_lookup(identifier)
+
     def get(self, identifier):
         return self.tools()._calendar_event_get(identifier)
+
+    def rename(self, event, title):
+        company_scope_guard('calendar', {'action': 'update', 'event_id': event['calendarItemIdentifier'], 'expected_start': event['start']}, strict=True)
+        after = self.tools()._calendar_event_rename(event, title)
+        if not after or after.get('title') != title:
+            raise RuntimeError('calendar title verification failed')
+
+    def set_notes(self, event, notes):
+        company_scope_guard('calendar', {'action': 'update', 'event_id': event['calendarItemIdentifier'], 'expected_start': event['start']}, strict=True)
+        if self.tools()._calendar_event_set_notes(event, notes) is None:
+            raise RuntimeError('calendar notes verification failed')
 
     def move(self, event, start, end):
         company_scope_guard('calendar', {'action': 'update', 'event_id': event['calendarItemIdentifier'], 'expected_start': event['start']})
@@ -267,7 +387,15 @@ class Notes:
 
     def link_state(self, identifier):
         before = self.current(identifier)
-        return None if not before else self.tools()._note_link_state(before.get('plaintext') or '')
+        return None if not before else {**self.tools()._note_link_state(before.get('plaintext') or ''), 'title': before.get('title')}
+
+    def rename(self, identifier, expected, title):
+        company_scope_guard('notes', {'action': 'update', 'note_id': identifier, 'rename_title': True}, strict=True)
+        before = self.current(identifier)
+        if not before or before.get('title') != expected:
+            raise ValueError('note title changed')
+        if not self.tools()._rename_linked_note(identifier, title, before).get('ok'):
+            raise RuntimeError('note title/body verification failed')
 
     def edit(self, identifier, lines, edits, before):
         company_scope_guard('notes', {'action': 'update', 'note_id': identifier})
@@ -334,13 +462,17 @@ def restore_bodies(value, archive):
 
 
 class Sync:
-    def __init__(self, store, reader, reminders, state_path, *, dry_run=False, notes=None, calendar=None):
+    def __init__(self, store, reader, reminders, state_path, *, dry_run=False, notes=None, calendar=None, title_sync=True):
+        self.execution_reads = False
+        self.link_lifecycle = None
+        self.content_engine = None
+        self.title_sync = title_sync
         self.notes = notes if notes is not None else Notes()
         self.calendar = calendar
         self.store, self.reader, self.reminders = store, reader, reminders
         self.path, self.dry = state_path, dry_run
         self.state = json.loads(state_path.read_text()) if state_path.exists() else {}
-        for key, default in [('pages', {}), ('actions', {}), ('notices', []), ('works', {})]:
+        for key, default in [('pages', {}), ('actions', {}), ('notices', []), ('works', {}), ('work_failures', {})]:
             self.state.setdefault(key, default)
         # The DB journal survives a crash between an external write and state replacement.
         self.rollback_path = state_path.with_name(state_path.stem + "-rollback.json")
@@ -376,6 +508,18 @@ class Sync:
         self.reports = []  # one Block Kit report per Notion page / linked work
         self.lines = None  # bullets for the Notion page being processed
         self.batch = None  # note lines queued for one write per note
+        self.completion = None  # work_completion.Completion when enabled
+        self.warning_diagnosis = None  # request_warning_diagnosis in production: 진단담당 first (2026-10-26)
+        self.warning_meta = {}  # warning line -> (common_id, reason code)
+        self.conflict_asks = []  # (common_id, title) content conflicts released to the owner: ask with buttons
+        self.resolved = []  # (common_id, outcome) conflicts the content sync closed this pass
+
+    def work_report(self, item, lines):
+        head = f'*연결된 업무 반영 — {item.get("title") or "제목 확인 불가"}*'
+        self.messages.append('\n'.join([head, *lines]))
+        url = next((r.get('metadata', {}).get('url') for r in item.get('knowledge_refs', []) if r.get('ref_type') == 'notion_page'), None)
+        self.reports.append({'title': item.get('title') or '제목 확인 불가', 'url': url, 'subtitle': '연결된 업무 반영',
+                             'lines': lines, 'when': datetime.now(seoul()).strftime('%-m/%-d %H:%M'), 'fallback': head})
 
     def say(self, line):
         (self.lines if self.lines is not None else self.messages).append(line)
@@ -383,6 +527,21 @@ class Sync:
     def persist(self):
         if not self.dry:
             save(self.path, self.state)
+
+    def drop_repeated_standing(self, cid, lines):
+        """Standing states (warnings, skipped or past-due reminders) recur on every pass until
+        someone acts; report them once per work and again only after they change or clear.
+        Change lines (written, created, moved...) are always reported."""
+        standing = [line for line in lines if line.startswith('• ⚠️') or
+                    line.startswith(('• 할 일 미리알림 skipped:', '• 할 일 미리알림 past_due:'))]
+        reported = self.state.setdefault('standing_reports', {})
+        signature = hashlib.sha256('\n'.join(standing).encode()).hexdigest() if standing else None
+        repeated = signature is not None and reported.get(cid) == signature
+        if reported.get(cid) != signature:
+            if signature: reported[cid] = signature
+            else: reported.pop(cid, None)
+            self.persist()
+        return [line for line in lines if line not in standing] if repeated else lines
 
     def report(self, key, message):
         if key not in self.state['notices']:
@@ -635,7 +794,8 @@ class Sync:
                     snap['notion'] = {'pid': page_id(page['id']), 'url': page.get('url', ''),
                                       'done': ((props.get('상태') or {}).get('status') or {}).get('name') == 'Done',
                                       'due': day_of(due), 'exact_due': deadline_time.canonical(due),
-                                      'due_range': bool(((props.get(DUE) or {}).get('date') or {}).get('end')), 'todos': todos}
+                                      'due_range': bool(((props.get(DUE) or {}).get('date') or {}).get('end')), 'todos': todos,
+                                      'title': page_title(page)[1]}
             except Exception:
                 snap['notion'] = None
         snap['notes'] = {}
@@ -673,43 +833,272 @@ class Sync:
         for nid in self.note_ids(self.store.get(item['common_id'])):
             self.append_note(item['common_id'], 'work:' + item['common_id'], marker, nid, '', line=line.replace('{today}', today) if line else '', edits=edits)
 
+    def work_revisions(self, item):
+        try:
+            sources = self.content_engine.sources
+            return {kind+'|'+sid:sources.read(kind,sid)['revision'] for kind,sid in sources.references(item)}
+        except Exception:
+            return None  # An unavailable read never proves an unchanged source.
+
+    def work_health(self, item, status, reason, errors):
+        health = self.state.setdefault('work_health', {})
+        cid = item['common_id']
+        signature = sorted((r['domain'],r['source_id']) for r in item['sources']) + sorted(
+            ('notion',r['external_id']) for r in item.get('knowledge_refs',[]) if r['ref_type']=='notion_page')
+        signature = json.loads(json.dumps(signature))
+        old = health.get(cid)
+        current = {'status':status,'reason':reason,'links':signature}
+        if status=='conflict':
+            current['revisions'] = self.work_revisions(item)
+        transitioned = old is None or (old.get('status'),old.get('reason')) != (status,reason)
+        warn = transitioned
+        if reason in TRANSIENT_REASONS:
+            # Same 3-consecutive-run rule as the plain error path: one failed read is not "repeated".
+            current['count'] = 1 if transitioned else old.get('count', 1) + 1
+            warn = current['count'] == 3
+        if old != current:
+            health[cid] = current
+            # 'unsupported' (e.g. several calendar originals in one work) is a design limit the owner
+            # cannot act on: keep it in the state, do not report it (2026-10-26).
+            if warn and status not in ('ok', 'unsupported'):
+                label = WORK_ERROR_REASONS.get(reason, '원본 조회·연결 상태를 확인해 주세요')
+                errors.append(f'• ⚠️ 「{item.get("title") or "제목 확인 불가"}」 — {label}')
+                self.warning_meta[errors[-1]] = (cid, reason)
+            self.persist()
+            return transitioned
+        return False
+
     def sync_links(self):
         with self.store._connect() as conn:
-            ids = [r['common_id'] for r in conn.execute("SELECT common_id FROM common_work WHERE status='active'")]
+            ids = [r['common_id'] for r in conn.execute("""
+                SELECT common_id FROM common_work WHERE (status='active' AND (
+                    EXISTS (SELECT 1 FROM source_links s WHERE s.common_id=common_work.common_id
+                            AND COALESCE(json_extract(s.metadata_json, '$.link_state.status'),'ok') IN ('ok','transient'))
+                    OR EXISTS (SELECT 1 FROM knowledge_refs k WHERE k.common_id=common_work.common_id
+                               AND k.ref_type='notion_page' AND k.unlinked_at IS NULL
+                               AND COALESCE(json_extract(k.metadata_json, '$.link_state.status'),'ok') IN ('ok','transient')))) OR (
+                    status='completed'
+                    AND EXISTS (SELECT 1 FROM source_links s WHERE s.common_id=common_work.common_id AND s.domain='calendar')
+                    AND NOT EXISTS (SELECT 1 FROM source_links s WHERE s.common_id=common_work.common_id AND s.domain='notes')
+                    AND NOT EXISTS (SELECT 1 FROM knowledge_refs k WHERE k.common_id=common_work.common_id
+                                    AND k.ref_type='notion_page' AND k.unlinked_at IS NULL))
+            """)]
+        errors = []
         for cid in ids:
             item = self.store.get(cid)
             kinds = {s['domain'] for s in item['sources']} | ({'notion'} if any(
                 r.get('ref_type') == 'notion_page' for r in item.get('knowledge_refs', [])) else set())
             if any(s.get('metadata', {}).get('deadline') for s in item['sources']):
                 kinds.add('deadline_source')
-            if len(kinds) < 2:
+            if len(kinds) < 2 and self.content_engine is None:
                 continue
+            if self.link_lifecycle is not None:
+                decisions = self.link_lifecycle.inspect(item, dry_run=self.dry)
+                labels = {'missing':'원본을 찾지 못해 연결만 해제했어요. 새 원본 연결은 소유자 확인이 필요해요',
+                          'unsupported':'자동 동기화를 지원하지 않는 원본이에요',
+                          'transient':'권한 또는 일시적 조회 실패로 처리를 미뤘어요',
+                          'conflict':'연결된 원본 내용이 서로 달라요'}
+                for decision in decisions:
+                    if self.dry and decision.get('report'):
+                        errors.append(f'• ⚠️ 「{item.get("title") or "제목 확인 불가"}」 — {labels[decision["status"]]} ({decision["domain"]})')
+                    if decision.get('changed') and decision['status'] != 'ok':
+                        log_work_error(self.path.parent.parent, cid, decision['reason'],
+                                       ValueError(decision['status']), frames=decision.get('traceback',[]),
+                                       exception_type=decision.get('exception_type'))
+                if any(d['status']=='transient' for d in decisions):
+                    continue
+                if not self.dry and any(d.get('old_id') for d in decisions):
+                    item = self.store.get(cid)
+                allowed = {(d['domain'],d['source_id']) for d in decisions if d['status']=='ok'}
+                item = {**item, 'sources':[r for r in item['sources'] if (r['domain'],r['source_id']) in allowed],
+                        'knowledge_refs':[r for r in item.get('knowledge_refs',[]) if
+                            r['ref_type']!='notion_page' or ('notion',r['external_id']) in allowed]}
+                if not allowed:
+                    continue
+                health = self.state.get('work_health',{}).get(cid,{})
+                signature = json.loads(json.dumps(sorted((r['domain'],r['source_id']) for r in item['sources']) + sorted(
+                    ('notion',r['external_id']) for r in item.get('knowledge_refs',[]) if r['ref_type']=='notion_page')))
+                if health.get('status')=='conflict' and health.get('links')==signature:
+                    revisions = self.work_revisions(item)
+                    if revisions is not None and revisions==health.get('revisions'):
+                        if self.completion is not None and not self.dry:
+                            # 진행도 is a status mark, independent of the content conflict.
+                            self.lines = []
+                            self.completion.fill_progress(item)
+                            lines, self.lines = self.lines, None
+                            if lines:
+                                self.work_report(item, lines)
+                        continue
             self.lines = []
             self.batch = {}
             try:
+                if self.completion is not None and not self.dry and item['status'] == 'active':
+                    # 진행도 first: a content conflict or read error below must not hold back the status mark.
+                    self.completion.fill_progress(item)
+                if self.content_engine is not None:
+                    outcome = self.content_engine.run(item)
+                    if outcome.get('resolved'):
+                        self.resolved.append((cid, outcome['resolved']))
+                    if self.link_lifecycle is not None:
+                        self.work_health(item, outcome.get('connection_status','ok'), outcome.get('connection_reason','read_ok'), errors)
+                    warned = False
+                    for line in outcome['messages']:
+                        code = content_warning_code(line)
+                        if code and self.warning_diagnosis is not None:
+                            # Content-sync warnings follow the 진단담당-first route too, once per work and reason.
+                            warned = True
+                            key = f'work-error:{cid}:{code}'
+                            if key not in self.state['notices']:
+                                self.state['notices'].append(key)
+                                errors.append(f'• ⚠️ 「{item.get("title") or "제목 확인 불가"}」 — {line.removeprefix("• ⚠️ ")}')
+                                self.warning_meta[errors[-1]] = (cid, code, item.get('title') or '제목 확인 불가')
+                            continue
+                        self.say(line)
+                    if not warned and self.warning_diagnosis is not None:
+                        self.state['notices'] = [k for k in self.state['notices']
+                                                 if not k.startswith(f'work-error:{cid}:work_content_')]
+                    if self.completion is not None:
+                        self.completion.check({**item, 'status': self.store.get(cid)['status']})
+                    if outcome['handled']:
+                        self.state['work_failures'].pop(cid, None)
+                        self.persist()
+                        continue
+                if item['status'] != 'active':
+                    continue
                 self.sync_work(item)
                 self.flush_notes()
+                self.state['work_failures'].pop(cid, None)
+                self.persist()
             except Exception as exc:
-                # Keep the previous snapshot so the change is seen again next run; other works continue.
-                self.report(f'work-error:{cid}:{type(exc).__name__}', f'• ⚠️ 이 업무를 맞추다 멈췄어요({type(exc).__name__}). 다음 확인 때 다시 시도해요.')
+                if self.link_lifecycle is not None:
+                    reason = work_error_reason(exc)
+                    status = 'conflict' if reason in {'linked_task_sources_conflict','ambiguous_task_deadline'} else 'transient'
+                    if self.work_health(item,status,reason,errors):
+                        log_work_error(self.path.parent.parent,cid,reason,exc)
+                else:
+                    reason = ('title_write_pending' if title_link_sync.pending(self, cid)
+                              else work_error_reason(exc))
+                    log_work_error(self.path.parent.parent, cid, reason, exc)
+                    previous = self.state['work_failures'].get(cid, {})
+                    count = previous.get('count', 0) + 1 if previous.get('reason') == reason else 1
+                    self.state['work_failures'][cid] = {'reason': reason, 'count': count}
+                    # Same originals as Sources.references; count before its duplicate-domain guard.
+                    originals = sum(s['domain'] in {'notes', 'calendar'} for s in item['sources']) + sum(
+                        r.get('ref_type') == 'notion_page' for r in item.get('knowledge_refs', []))
+                    skip = self.content_engine is not None and originals == 1 and reason in NON_TARGET_REASONS
+                    prefix = f'work-error:{cid}:'
+                    # Preserve old exception-type keys, without suppressing future distinct coded reasons.
+                    already = prefix + reason in self.state['notices'] or any(
+                        key.startswith(prefix) and key[len(prefix):] not in WORK_ERROR_REASONS
+                        for key in self.state['notices'])
+                    if not skip and not already and (reason not in TRANSIENT_REASONS or count >= 3):
+                        errors.append(f'• ⚠️ 「{item.get("title") or "제목 확인 불가"}」 — {WORK_ERROR_REASONS[reason]}')
+                        self.warning_meta[errors[-1]] = (cid, reason)
+                        self.state['notices'].append(prefix + reason)
+                    self.persist()
             finally:
                 self.batch = None
                 lines, self.lines = self.lines, None
+                lines = self.drop_repeated_standing(cid, lines)
                 if lines:
-                    head = f'*연결된 업무 반영 — {item.get("title") or "제목 확인 불가"}*'
-                    self.messages.append('\n'.join([head, *lines]))
-                    url = next((r.get('metadata', {}).get('url') for r in item.get('knowledge_refs', []) if r.get('ref_type') == 'notion_page'), None)
-                    self.reports.append({'title': item.get('title') or '제목 확인 불가', 'url': url, 'subtitle': '연결된 업무 반영',
-                                         'lines': lines, 'when': datetime.now(seoul()).strftime('%-m/%-d %H:%M'), 'fallback': head})
+                    self.work_report(item, lines)
+
+        if self.completion is not None:
+            # Works completed in conversation or by a reminder are no longer in the active loop.
+            for item in self.completion.completed_items():
+                self.lines = []
+                self.completion.check(item)
+                lines, self.lines = self.lines, None
+                if lines:
+                    self.work_report(item, lines)
+            self.completion.finish_pass()
+
+        if self.link_lifecycle is not None and not self.dry:
+            # Migration and watcher share the same durable transition journal.
+            # A detached source is still reportable after it leaves source_links.
+            with self.store._connect() as conn:
+                transitions = conn.execute("SELECT event_id, common_id, payload_json FROM common_work_events WHERE event_type='source_state_changed' ORDER BY event_id").fetchall()
+            notices = set(self.state['notices'])
+            latest = {}
+            for event in transitions:
+                data = json.loads(event['payload_json'])
+                latest[(event['common_id'],data['domain'],data['source_id'])] = event['event_id']
+            for event in transitions:
+                key = f'link-state-event:{event["event_id"]}'
+                if key in notices:
+                    continue
+                data = json.loads(event['payload_json'])
+                self.state['notices'].append(key)
+                if (event['event_id']==latest[(event['common_id'],data['domain'],data['source_id'])]
+                        and data['status'] not in {'ok','out_of_scope'}):
+                    if data['status']=='missing' and getattr(self,'link_decisions_enabled',False):
+                        from link_decisions import decision_key
+                        pending=self.state.setdefault('pending_link_decisions',[])
+                        key=decision_key({'common_id':event['common_id'],**data})
+                        if key not in pending:pending.append(key)
+                        continue
+                    title = self.store.get(event['common_id'])['title']
+                    label = {'missing':'원본을 찾지 못해 연결만 해제했어요. 새 원본 연결은 소유자 확인이 필요해요',
+                             'unsupported':'자동 동기화를 지원하지 않는 원본이에요',
+                             'transient':'권한 또는 일시적 조회 실패로 처리를 미뤘어요',
+                             'conflict':'연결된 원본 내용이 서로 달라요'}[data['status']]
+                    errors.append(f'• ⚠️ 「{title}」 (`{event["common_id"]}`) — {label} ({data["domain"]})')
+                    self.warning_meta[errors[-1]] = (event['common_id'], 'link_' + data['status'])
+            self.persist()
+        errors = self.route_warnings(errors)
+        if errors:
+            head = '*🟡 연결된 업무 확인 필요*'
+            text = '\n'.join([head, *errors])
+            self.messages.append(text)
+            self.reports.append({'title': '연결된 업무 확인 필요', 'url': None,
+                                 'subtitle': '연결 업무 감시 오류 요약', 'lines': errors,
+                                 'when': datetime.now(seoul()).strftime('%-m/%-d %H:%M'), 'fallback': text})
+
+    def route_warnings(self, errors):
+        """2026-10-26 사용자 결정: '확인 필요' warnings go to 진단담당 first. The owner gets a warning only
+        when 진단담당 says the owner must fix the original, the diagnosis fails or is refused (limits,
+        disabled), or no verdict arrives within an hour. A program defect reaches the owner as 진단담당's
+        report-room result (with the existing autofix flow); a recovered one stays silent."""
+        if self.dry or self.warning_diagnosis is None:
+            return errors
+        pending = self.state.setdefault('warning_diagnoses', {})
+        owner, now = [], time.time()
+        def release(line, meta, note=''):
+            # 2026-10-27: a content conflict reaches the owner as a question with a button per original.
+            if meta and meta[1] == 'work_content_conflict' and len(meta) > 2:
+                self.conflict_asks.append((meta[0], meta[2]))
+            else:
+                owner.append(line + note)
+        for rid, row in list(pending.items()):
+            status = diagnosis_status(self.path.parent.parent.parent.parent, rid)
+            if status in {'normal', 'posted'}:
+                pending.pop(rid)
+            elif status == 'owner_needed':
+                release(row['line'], row.get('meta')); pending.pop(rid)
+            elif status in {'failed', 'no_post', 'missing'} or now - row['at'] > 3600:
+                release(row['line'], row.get('meta'), ' _(진단담당 진단을 받지 못해 그대로 알려요)_'); pending.pop(rid)
+        for line in errors:
+            meta = self.warning_meta.get(line)
+            rid = meta and self.warning_diagnosis(meta[0], meta[1])
+            if rid:
+                pending[rid] = {'line': line, 'at': now, 'meta': list(meta)}
+            else:
+                release(line, meta)
+        self.persist()
+        return owner
 
     def sync_work(self, item):
         cid = item['common_id']
         cur = self.snapshot(item)
         prev = self.state['works'].get(cid)
-        if prev is None or self.dry:
+        if prev is None:
             if not self.dry:
                 self.state['works'][cid] = self.storable(cur, None)
                 self.persist()
+            return
+        if self.title_sync and title_link_sync.synchronize(self, item, cur, prev):
+            return
+        if self.dry:
             return
         notion, pnotion = cur['notion'], prev.get('notion')
         # 1. Reminder completed outside Notion -> check the matching Notion to-do, log in memo.
@@ -846,7 +1235,8 @@ class Sync:
     def storable(cur, prev):
         """Persist only comparable fields; keep the previous value where a source was unreadable."""
         prev = prev or {}
-        out = {'notion': cur['notion'] if cur['notion'] is not None else prev.get('notion'), 'todo': {}, 'calendar': {}, 'notes': {}}
+        out = {'notion': cur['notion'] if cur['notion'] is not None else prev.get('notion'), 'todo': {}, 'calendar': {}, 'notes': {},
+               'title_sync_initialized': True}
         for kind in ('todo', 'calendar', 'notes'):
             for key, value in (cur.get(kind) or {}).items():
                 value = value if value is not None else (prev.get(kind) or {}).get(key)
@@ -855,7 +1245,36 @@ class Sync:
         return out
 
     def run(self):
+        if not self.execution_reads:
+            return self._run()
+        import reminder_reads
+        with reminder_reads.batch():
+            state = self.state.setdefault('reminder_run', {'failures':0, 'reported':False})
+            try:
+                reminder_reads.all(subprocess.run)
+            except reminder_reads.ReminderReadError as exc:
+                state['failures'] += 1
+                log_work_error(self.path.parent.parent, 'run', 'reminder_read_failed', exc)
+                if state['failures'] >= 3 and not state['reported']:
+                    head = '*🟡 연결된 업무 확인 필요*'
+                    lines = ['• ⚠️ 미리알림 조회가 3회 연속 실패해 이번 연결 업무 처리를 모두 미뤘어요. 권한과 연결 상태 확인이 필요해요.']
+                    text = '\n'.join([head,*lines])
+                    self.messages.append(text)
+                    self.reports.append({'title':'연결된 업무 확인 필요','subtitle':'미리알림 조회 실패',
+                                         'lines':lines,'when':datetime.now(seoul()).strftime('%-m/%-d %H:%M'),'fallback':text})
+                    state['reported'] = True
+                self.persist()
+                return '\n\n'.join(self.messages)
+            state.update(failures=0,reported=False)
+            self.persist()
+            return self._run()
+
+    def _run(self):
         now = datetime.now(timezone.utc)
+        if self.content_engine is not None:
+            self.sync_links()
+            self.persist()
+            return '\n\n'.join(self.messages)
         since = self.state.get('cursor', (now - timedelta(days=7)).isoformat())
         pages = {page_id(p['id']): p for p in self.reader.changed(since)}
         # Revisit tracked pages: a new link does not change Notion's last_edited_time.
@@ -889,8 +1308,29 @@ def main(*, dry_run=False):
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             return
-        store = CommonWorkStore(Path.home() / '.hermes/shared/common-work-links.sqlite3')
-        sync = Sync(store, NotionReader(home), Reminders(), state, dry_run=dry_run, calendar=Calendar())
+        store = CommonWorkStore.production(Path.home() / '.hermes/shared/common-work-links.sqlite3')
+        sync = Sync(store, NotionReader(home), Reminders(), state, dry_run=dry_run, calendar=Calendar(),
+                    title_sync=settings.get('title_sync', True) is True)
+        from link_lifecycle import Lifecycle
+        from source_identity import production_reader
+        sync.link_lifecycle = Lifecycle(store, production_reader)
+        sync.execution_reads = True
+        import work_sync
+        import work_sources
+        import task_reminders_sync
+        def sync_task_reminders(item, dry):
+            native = task_reminders_sync.Native(home)
+            native.watcher_item = item
+            return task_reminders_sync.sync(home, {'common_id':item['common_id'], 'dry_run':dry},
+                                            native=native, serialized=True)
+        sync.content_engine = work_sync.configured(home, work_sources.Sources(home, reader=sync.reader, notes=sync.notes, calendar=sync.calendar),
+            store, settings, dry_run=dry_run, reminders=sync_task_reminders)
+        sync.link_decisions_enabled = settings.get('link_decisions') is True
+        sync.warning_diagnosis = request_warning_diagnosis
+        import work_completion
+        completion = settings.get('completion') if isinstance(settings.get('completion'), dict) else {}
+        if sync.content_engine is not None and completion.get('enabled') is True and completion.get('since'):
+            sync.completion = work_completion.Completion(sync, since=completion['since'])
         try:
             output = sync.run()
         except Exception as exc:
@@ -910,6 +1350,34 @@ def main(*, dry_run=False):
                 missed = [output]
             if missed:
                 print('\n\n'.join(missed))
+
+        if not dry_run and (sync.conflict_asks or sync.resolved):
+            import conflict_decisions
+            try:
+                for cid, resolved in sync.resolved:
+                    conflict_decisions.close(home, cid, resolved)
+                missed = conflict_decisions.ask(home, sync.conflict_asks)
+                if missed:
+                    print('\n'.join(f'연결된 업무 확인 필요: 「{title}」 — 두 원본이 서로 다르게 바뀌어 충돌로 보류했어요.'
+                                    for _, title in missed))
+            except Exception as exc:
+                log_work_error(home, 'conflict-decisions', 'conflict_ask_failed', exc)
+
+        if sync.completion is not None and not dry_run:
+            try:
+                sync.completion.flush_asks()
+            except Exception as exc:
+                log_work_error(home, 'completion', 'completion_ask_failed', exc)
+
+        if sync.link_decisions_enabled and not dry_run and sync.state.get('pending_link_decisions'):
+            from link_decisions import Decisions, Inventory
+            try:
+                result=Decisions(home,store,Inventory(home)).request(dry_run=False,only_keys=sync.state['pending_link_decisions'])
+                handled={r['id'] for r in result['rows'] if r['status']=='ok'}
+                sync.state['pending_link_decisions']=[key for key in sync.state['pending_link_decisions'] if key not in handled]
+                sync.persist()
+            except Exception as exc:
+                log_work_error(home,'link-decisions','decision_request_failed',exc)
 
 
 if __name__ == '__main__':

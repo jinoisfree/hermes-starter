@@ -6,7 +6,7 @@ import re
 
 COLORS = {"red": "#FF3B30", "gray": "#8E8E93", "blue": "#0A84FF"}
 # Only a complete, reserved prefix is markup; symbols elsewhere are literal.
-FORMAT = re.compile(r"^\{fmt:(red|gray|blue|plain|u|red,u|gray,u|blue,u|plain,u)\} ")
+FORMAT = re.compile(r"^\{fmt:(red|gray|blue|plain|u|red,u|gray,u|blue,u|plain,u)\}\s*")
 DATE = re.compile(r"(?<![\w/])(?:\d{4}[-./]\d{1,2}[-./]\d{1,2}|\d{1,2}/\d{1,2}|(?:\d{4}년\s*)?\d{1,2}월\s*\d{1,2}일)(?!\d)")
 LEGACY_BLOCKS = {
     "확인사항": "확인 및 결정", "확인": "확인 및 결정", "확인해야 할 사항": "확인 및 결정",
@@ -17,14 +17,18 @@ LEGACY_BLOCKS = {
 }
 
 
-def parse(summary):
+def parse(summary, *, errors=None):
     grouped = {}
     parent = None
-    for raw in summary.splitlines():
+    for number, raw in enumerate(summary.splitlines(), 1):
         line = raw.strip()
         if not line.startswith(("- ", "• ", "○ ")):
             continue  # Existing non-summary text is not interpreted as markup.
         detail = line[2:].strip()
+        # Consume a row style before splitting the section at its colon.
+        leading = FORMAT.match(detail)
+        if leading:
+            detail = detail[leading.end():]
         child = raw.startswith("  - ") and parent is not None
         if child:
             rows = parent["children"]
@@ -37,8 +41,9 @@ def parse(summary):
                 detail = rest.strip()
             rows = grouped.setdefault(heading or "핵심 내용", [])
         checked = None
-        color = None
-        underline = False
+        flags = leading[1].split(",") if leading else []
+        color = next((f for f in flags if f != "u"), "plain") if leading else None
+        underline = "u" in flags
         escaped = detail.startswith("\\")
         if escaped:
             detail = detail[1:]
@@ -52,6 +57,9 @@ def parse(summary):
                 color = next((f for f in flags if f != "u"), "plain")
                 underline = "u" in flags
                 detail = detail[match.end():]
+        if errors is not None and ((not child and "{fmt" in heading) or
+                                   (not escaped and "{fmt" in detail)):
+            errors.append((number, raw))
         label, _, value = detail.partition("|")
         label, value = label.strip(), value.strip()
         if color is None and any(word in label for word in ("유의", "주의", "위험", "기한", "마감")):
@@ -65,6 +73,17 @@ def parse(summary):
         if not child:
             parent = row
     return grouped
+
+
+def validate_summary(summary):
+    """Report unconsumed reserved markup before a write; escaped rows stay literal."""
+    errors = []
+    parse(summary, errors=errors)
+    if errors:
+        number, raw = errors[0]
+        return (f"summary {number}행의 서식을 해석하지 못했습니다: {raw}. "
+                "구역 콜론 뒤, 라벨 앞에 둡니다. 예: - 확인 필요: {fmt:gray} 수익 모델 | 값")
+    return None
 
 
 def _value_html(value):

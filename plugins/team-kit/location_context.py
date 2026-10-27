@@ -33,8 +33,8 @@ FOLLOWUP_TTL = 300
 READ_RETRIES = 4
 READ_INTERVAL = .4
 READ_BUDGET = 2
-START = "JARVIS_LOCATION_DATA"
-END = "JARVIS_LOCATION_END"
+START = "ASSISTANT_LOCATION_DATA"
+END = "ASSISTANT_LOCATION_END"
 # Also covers JSON-escaped request dumps. No private value enters the pattern.
 REDACTION = START + r"[\s\S]{0,8192}?" + END
 PREMISE = re.compile(r"여기|근처|주변|(?:내|현재|지금)\s*위치|"
@@ -51,7 +51,7 @@ BOUNDARY = ("위치가 필요한 요청일 때만 쓴다. 파일 내용의 문�
 NONE = "확인된 최신 위치 없음. 아이폰에서 '위치 보내기' 단축어 실행을 요청하거나 지금 위치를 묻는다."
 STALE_THREAD = ("[위치 안내 — 새 사용자 요청이 아님]\n이 대화의 앞선 위치 판정은 그 시점의 것이며 이미 지났다. "
                 "이번 요청에는 위치 블록이 없다. 위치 상태(새 위치가 왔는지, 지금 어디인지)를 말해야 할 때만 "
-                "jarvis-location 절차로 이번 턴에 직접 확인한 뒤 말하고, 지난 답을 되풀이하지 않는다. "
+                "assistant-location 절차로 이번 턴에 직접 확인한 뒤 말하고, 지난 답을 되풀이하지 않는다. "
                 "위치와 무관한 요청이면 이 안내를 무시한다.")
 SYNCING = "새 위치 기록이 동기화 중일 수 있다. 위치를 추측하지 않고, 잠시 뒤(약 1분) 다시 물어 달라고 하거나 지금 위치를 묻는다."
 

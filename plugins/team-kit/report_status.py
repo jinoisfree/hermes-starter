@@ -25,7 +25,7 @@ STATES = {
 }
 BUTTON_BLOCK = 'hermes_reply_buttons'
 STATUS_BLOCK = 'hermes_report_status'
-REPORT_CHANNELS = ('REPLACE_SLACK_ID', 'REPLACE_SLACK_ID', 'REPLACE_SLACK_ID')  # 보고방, 학원, SNS담당방
+REPORT_CHANNELS = ('REPLACE_SLACK_ID', 'REPLACE_SLACK_ID', 'REPLACE_SLACK_ID')  # 보고 채널, 학습 채널, SNS담당방
 _MARK = re.compile(r'^(\*?)(?:🔴|🟡|🟢|🔵|🟠|⚪|:red_circle:|:large_yellow_circle:|:large_green_circle:|'
                    r':large_blue_circle:|:large_orange_circle:|:white_circle:)\s*')
 _KEEP = ('color', 'fallback', 'blocks', 'mrkdwn_in', 'text')
@@ -116,7 +116,7 @@ def handle(home, args, base, session_id='', **_):
         if not thread:
             raise ValueError('보고 스레드 안에서만 쓸 수 있어.')
         if not (src.get('chat_type') == 'dm' or channel in REPORT_CHANNELS):
-            raise ValueError('보고방·학원·SNS담당방·소유자 DM의 보고 스레드에서만 쓸 수 있어.')
+            raise ValueError('보고 채널·학습 채널·SNS담당방·소유자 DM의 보고 스레드에서만 쓸 수 있어.')
         slack = lambda method, body: base.slack(home, method, body)
         bot = slack('auth.test', {}).get('user_id')
         mark(slack, channel, thread, args.get('state', ''), args.get('note', ''), bot_user=bot)

@@ -67,6 +67,76 @@ _TRASH_SCRIPT = (
 CLOUD_STORAGE = Path.home() / "Library" / "CloudStorage"
 
 
+@contextmanager
+def _materialize_dataless():
+    """Allow File Provider downloads only on this thread, restoring its policy."""
+    libc = None
+    previous = -1
+    changed = False
+    if sys.platform == "darwin":
+        try:
+            libc = ctypes.CDLL(None, use_errno=True)
+            previous = libc.getiopolicy_np(3, 1)  # MATERIALIZE_DATALESS_FILES, THREAD
+            if previous >= 0:
+                changed = libc.setiopolicy_np(3, 1, 2) == 0  # ON
+        except (OSError, AttributeError, TypeError, ValueError):
+            pass
+    try:
+        yield
+    finally:
+        if changed:
+            try:
+                libc.setiopolicy_np(3, 1, previous)
+            except (OSError, AttributeError, TypeError, ValueError):
+                pass
+
+
+# These children only inspect the requested folder. Never enable process scope
+# in the gateway: unrelated search tools must retain their original policy.
+_MATERIALIZE_CHILD = """import sys
+if sys.platform == 'darwin':
+ try:
+  import ctypes
+  ctypes.CDLL(None).setiopolicy_np(3, 1, 2)
+ except (OSError, AttributeError, TypeError, ValueError):
+  pass
+"""
+
+
+def _file_error(exc):
+    if isinstance(exc, OSError) and exc.errno == errno.EDEADLK:
+        return "아직 이 Mac에 내려받지 않은 Synology 항목이라 열지 못했습니다(EDEADLK)"
+    return type(exc).__name__
+
+
+def _child_dataless_error(stderr):
+    return "Resource deadlock avoided" in stderr or "EDEADLK" in stderr
+
+
+def _prepare_document_inputs(tool_name, args, roots):
+    """Hydrate validated inputs before an external reader starts; never outputs."""
+    if tool_name == "pdf_pages":
+        paths = [item.get("path") for item in args["sources"]]
+    elif tool_name == "doc_fill":
+        paths = [args.get("template"), args.get("data")]
+    elif tool_name == "doc_convert":
+        paths = [args.get("from")]
+    elif tool_name == "doc_edit" and args.get("create") is True:
+        paths = []
+    else:
+        paths = [args.get("path")]
+    try:
+        with _materialize_dataless():
+            for path in paths:
+                target = inside(path, roots)
+                if target is not None:
+                    with target.open("rb") as source:
+                        source.read(1)
+    except OSError as exc:
+        return _file_error(exc)
+    return None
+
+
 def folders(config: Any) -> list[Path]:
     """The configured folders that exist, resolved. Empty when the feature is off."""
     if not isinstance(config, dict) or config.get("enabled") is not True:
@@ -317,6 +387,7 @@ def _drive_fragment(config: Any, url: str, target: Path) -> str:
         return url
 
 
+@_materialize_dataless()
 def file_location(config: Any, args: dict[str, Any], opener: Any = None, **_: Any) -> str:
     if not available(config, "file_location"):
         return _error("No folder link lookup is configured for this profile")
@@ -374,7 +445,7 @@ def file_location(config: Any, args: dict[str, Any], opener: Any = None, **_: An
                 item.update(linked_folder=linked.name, below=str(folder.relative_to(linked)))
             links.append(item)
         except (OSError, ValueError, RuntimeError) as exc:
-            failed.append({"path": path, "error": f"file_location failed ({type(exc).__name__})"})
+            failed.append({"path": path, "error": f"file_location failed ({_file_error(exc)})"})
         finally:
             item = links[-1] if len(links) > before_links else unlinked[-1] if len(unlinked) > before_unlinked else None
             if item is not None and target is not None and target.is_file() and _synology_enabled(config):
@@ -622,7 +693,7 @@ def _access(root: Path, *, runner: Any = None) -> str | None:
         return None
     try:
         result = (runner or subprocess.run)(
-            [sys.executable, "-c", "import os,sys; os.scandir(sys.argv[1]).close()", str(root)],
+            [sys.executable, "-c", _MATERIALIZE_CHILD + "import os; os.scandir(sys.argv[1]).close()", str(root)],
             capture_output=True, text=True, timeout=ACCESS_TIMEOUT,
         )
     except subprocess.TimeoutExpired:
@@ -632,8 +703,10 @@ def _access(root: Path, *, runner: Any = None) -> str | None:
                 "(allow osascript to access files managed by a provider such as Synology Drive). "
                 "Ask the owner to click Allow on the Mac mini screen; do not retry this call before approval")
     except OSError as exc:
-        return f"folder access check failed for {root}: {type(exc).__name__}; ask the owner to check file access permissions"
+        return f"folder access check failed for {root}: {_file_error(exc)}; ask the owner to check file access permissions"
     if result.returncode != 0:
+        if _child_dataless_error(result.stderr):
+            return _file_error(OSError(errno.EDEADLK, result.stderr))
         if "PermissionError" in result.stderr:
             return f"folder access denied for {root}: PermissionError; ask the owner to allow file access on the Mac mini"
         return f"folder access check failed for {root} (exit {result.returncode}); ask the owner to check folder availability and permissions"
@@ -641,6 +714,7 @@ def _access(root: Path, *, runner: Any = None) -> str | None:
     return None
 
 
+@_materialize_dataless()
 def problem(tool_name: str, args: dict[str, Any], roots: list[Path], *, runner: Any = None) -> str | None:
     if reason := _path_problem(tool_name, args, roots):
         return reason
@@ -779,6 +853,8 @@ def guard(config: Any, *, tool_name: str, args: Any, chat: bool) -> dict[str, st
     if tool_name == "doc_fill" and call.get("action") == "inspect":
         return None  # reading only, like doc_read
     if tool_name == "doc_fill" and chat:
+        if reason := _prepare_document_inputs("doc_fill", call, roots):
+            return {"action": "block", "message": reason}
         plan = json.loads(_ask(_fill_job("fill_inspect", call, roots)))
         if plan.get("ok") is not True:
             return {"action": "block", "message": f"doc_fill: {plan.get('error') or 'could not check the template and data'}"}
@@ -812,7 +888,7 @@ def note(config: Any) -> str:
                 "file_location은 지정 폴더의 NAS 내부 링크를 돌려준다. 받은 링크만 쓰고 없으면 받지 못했다고 알린다. "
                 "file_move·file_copy·folder_create·doc_edit·pdf_pages는 이 폴더에서만 변경하며 대화에서 호출마다 승인받는다. "
                 "예약·배경 변경은 거부한다. 옮기기·복사·새 파일은 덮어쓰지 않으며 doc_edit의 원본 덮어쓰기는 먼저 알린다. "
-                "기존 읽기·쓰기·휴지통 도구의 범위와 승인은 별도 파일 안내를 따른다. 절차는 jarvis-files를 연다.")
+                "기존 읽기·쓰기·휴지통 도구의 범위와 승인은 별도 파일 안내를 따른다. 절차는 assistant-files를 연다.")
     allowed, config_error = _no_approval(config)
     approval_note = ('소유자가 분명히 시킨 ' + '·'.join(sorted(allowed)) +
                      '는 승인 없이 바로 실행한다. 나머지 변경은 호출마다 사용자 승인을 묻는다. ')
@@ -989,6 +1065,7 @@ def _wait_link_shared(token: str, file_id: str, channel: str, info: dict, opener
     raise _LinkSharingPending()
 
 
+@_materialize_dataless()
 def file_link(config: Any, args: dict[str, Any], opener: Any = None, sleep: Any = None, **_: Any) -> str:
     if not available(config, "file_link"):
         return _error("file_link is disabled; use file_location for Synology folder links")
@@ -1078,13 +1155,14 @@ def _file_link(config: Any, args: dict[str, Any], opener: Any = None, sleep: Any
             break
         except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
             # No response bodies, upload URLs or tokens in errors; an uncertain upload is never repeated.
-            failed.append({"path": path, "error": f"file_link failed ({type(exc).__name__}); upload may have completed. Do not retry."})
+            failed.append({"path": path, "error": f"file_link failed ({_file_error(exc)}); upload may have completed. Do not retry."})
             break
     not_attempted = args["paths"][len(links) + len(failed):]
     return json.dumps({"ok": not failed, "links": links, **({"failed": failed} if failed else {}),
                        "not_attempted": not_attempted}, ensure_ascii=False)
 
 
+@_materialize_dataless()
 def file_list(config: Any, args: dict[str, Any], runner: Any = None, **_: Any) -> str:
     roots = folders(config)
     if not str(args.get("path") or "").strip():
@@ -1097,8 +1175,8 @@ def file_list(config: Any, args: dict[str, Any], runner: Any = None, **_: Any) -
     try:
         entries = sorted(target.iterdir(), key=lambda entry: entry.name.casefold())
     except OSError as exc:
-        return json.dumps({"ok": False, "complete": False, "error": f"could not list the folder: {type(exc).__name__}",
-                           "unreadable_folders": [{"path": ".", "error": type(exc).__name__, "errno": exc.errno}]})
+        return json.dumps({"ok": False, "complete": False, "error": f"could not list the folder: {_file_error(exc)}",
+                           "unreadable_folders": [{"path": ".", "error": _file_error(exc), "errno": exc.errno}]})
     items = []
     unreadable = 0
     for entry in entries[:LIST_LIMIT]:
@@ -1108,12 +1186,13 @@ def file_list(config: Any, args: dict[str, Any], runner: Any = None, **_: Any) -
                           "size": None if entry.is_dir() else stat.st_size, "modified": int(stat.st_mtime)})
         except OSError as exc:
             unreadable += 1
-            items.append({"name": entry.name, "type": "unreadable", "error": type(exc).__name__, "errno": exc.errno})
+            items.append({"name": entry.name, "type": "unreadable", "error": _file_error(exc), "errno": exc.errno})
     return json.dumps({"ok": True, "path": str(target), "entries": items, "total": len(entries),
                        "truncated": len(entries) > LIST_LIMIT, "unreadable_entries": unreadable,
                        "complete": not unreadable and len(entries) <= LIST_LIMIT}, ensure_ascii=False)
 
 
+@_materialize_dataless()
 def folder_create(config: Any, args: dict[str, Any], **_: Any) -> str:
     roots = folders(config)
     if reason := problem("folder_create", args, roots):
@@ -1122,7 +1201,7 @@ def folder_create(config: Any, args: dict[str, Any], **_: Any) -> str:
     try:
         target.mkdir(parents=True, exist_ok=False)
     except OSError as exc:
-        return _error(f"could not create the folder: {type(exc).__name__}")
+        return _error(f"could not create the folder: {_file_error(exc)}")
     return json.dumps({"ok": True, "created": str(target)}, ensure_ascii=False)
 
 
@@ -1162,6 +1241,7 @@ def _move_exclusive(source, target):
         source.unlink()
 
 
+@_materialize_dataless()
 def file_move(config: Any, args: dict[str, Any], **_: Any) -> str:
     """Move in order and stop at the first failure, reporting what moved and what did not."""
     roots = folders(config)
@@ -1178,13 +1258,14 @@ def file_move(config: Any, args: dict[str, Any], **_: Any) -> str:
             _move_exclusive(source, target)
             moved.append({"from": str(source), "to": str(target)})
         except (OSError, shutil.Error) as exc:
-            failed = {"from": str(source), "to": str(target), "error": type(exc).__name__, "index": index}
+            failed = {"from": str(source), "to": str(target), "error": _file_error(exc), "index": index}
             break
     not_attempted = [{"from": str(s), "to": str(t)} for s, t in pairs[len(moved) + (1 if failed else 0):]]
     return json.dumps({"ok": failed is None, "moved": moved, **({"failed": failed} if failed else {}), "not_attempted": not_attempted},
                       ensure_ascii=False)
 
 
+@_materialize_dataless()
 def file_trash(config: Any, args: dict[str, Any], runner: Any = None, **_: Any) -> str:
     roots = folders(config)
     if reason := problem("file_trash", args, roots):
@@ -1201,7 +1282,7 @@ def file_trash(config: Any, args: dict[str, Any], runner: Any = None, **_: Any) 
         if trash(target):
             return json.dumps({"ok": True, "trashed": str(target)}, ensure_ascii=False)
     except (OSError, subprocess.SubprocessError) as exc:
-        return _error(f"could not reach the Trash: {type(exc).__name__}")
+        return _error(f"could not reach the Trash: {_file_error(exc)}")
     if CLOUD_STORAGE not in target.parents or not target.exists():
         return _error("the item was not moved to the Trash")
     # The item keeps its name in the Trash; the folder around it is only a holding place.
@@ -1212,7 +1293,7 @@ def file_trash(config: Any, args: dict[str, Any], runner: Any = None, **_: Any) 
     except (OSError, shutil.Error) as exc:
         if target.exists():  # a copy that stopped halfway leaves the original whole
             shutil.rmtree(holding, ignore_errors=True)
-        return _error(f"the item was not moved to the Trash (could not take it out of the synced folder: {type(exc).__name__})")
+        return _error(f"the item was not moved to the Trash (could not take it out of the synced folder: {_file_error(exc)})")
     try:
         trashed = trash(staged)
     except (OSError, subprocess.SubprocessError):
@@ -1233,20 +1314,23 @@ def _ask(job: dict[str, Any], *, runner: Any = None, timeout: int = 120) -> str:
     """Run a read-only worker job and return its JSON as it is."""
     if not DOC_PYTHON.exists():
         return _error("the document environment (~/.local/share/hermes-docs) is missing; "
-                      "it has to be rebuilt in the Paseo hermes-config project")
+                      "it has to be rebuilt in the Paseo Hermes-desktop-pet project")
     try:
         result = (runner or subprocess.run)(
             [str(DOC_PYTHON), str(Path(__file__).with_name("doc_worker.py"))],
             input=json.dumps(job, ensure_ascii=False), capture_output=True, text=True, timeout=timeout)
         answer = json.loads(result.stdout.strip().splitlines()[-1])
     except (OSError, subprocess.SubprocessError, ValueError, IndexError) as exc:
-        return _error(f"could not read the document: {type(exc).__name__}")
+        return _error(f"could not read the document: {_file_error(exc)}")
     return json.dumps(answer if isinstance(answer, dict) else {"ok": False, "error": "no result"}, ensure_ascii=False)
 
 
+@_materialize_dataless()
 def doc_read(config: Any, args: dict[str, Any], runner: Any = None, **_: Any) -> str:
     roots = folders(config)
     if reason := problem("doc_read", args, roots):
+        return _error(reason)
+    if reason := _prepare_document_inputs("doc_read", args, roots):
         return _error(reason)
     path = inside(args.get("path"), [*roots, attachments(), image_attachments()])
     job = {"kind": "read_" + READ_DOC_KINDS[path.suffix.lower()], "source": str(path),
@@ -1254,9 +1338,12 @@ def doc_read(config: Any, args: dict[str, Any], runner: Any = None, **_: Any) ->
     return _ask(job, runner=runner)
 
 
+@_materialize_dataless()
 def pdf_render(config: Any, args: dict[str, Any], runner: Any = None, **_: Any) -> str:
     roots = folders(config)
     if reason := problem("pdf_render", args, roots):
+        return _error(reason)
+    if reason := _prepare_document_inputs("pdf_render", args, roots):
         return _error(reason)
     path = inside(args.get("path"), [*roots, attachments(), image_attachments()])
     cache = renders()
@@ -1267,7 +1354,7 @@ def pdf_render(config: Any, args: dict[str, Any], runner: Any = None, **_: Any) 
             if old.is_dir() and old.stat().st_mtime < cutoff:
                 shutil.rmtree(old, ignore_errors=True)
     except OSError as exc:
-        return _error(f"could not prepare the page image folder: {type(exc).__name__}")
+        return _error(f"could not prepare the page image folder: {_file_error(exc)}")
     stat = path.stat()
     key = hashlib.sha256(f"{path}|{stat.st_mtime_ns}|{stat.st_size}".encode("utf-8")).hexdigest()[:16]
     return _ask({"kind": "render", "source": str(path), "pages": args.get("pages"), "limit": MAX_RENDER_PAGES,
@@ -1382,7 +1469,7 @@ def _nas_inventory(config, top, opener=None):
 
 def _refresh_scan_folder(path, timeout):
     # Isolate File Provider stalls. Only scandir/stat; no file content is opened.
-    code = '''import os,sys,json,stat
+    code = _MATERIALIZE_CHILD + '''import os,sys,json,stat
 rows=[]
 with os.scandir(sys.argv[1]) as items:
  for e in items:
@@ -1393,6 +1480,8 @@ print(json.dumps(rows))'''
     proc = subprocess.run([sys.executable, '-c', code, str(path)], capture_output=True,
                           text=True, timeout=timeout, check=False)
     if proc.returncode:
+        if _child_dataless_error(proc.stderr):
+            raise OSError(errno.EDEADLK, _file_error(OSError(errno.EDEADLK, '')))
         raise OSError('local recheck failed')
     return json.loads(proc.stdout)
 
@@ -1449,6 +1538,7 @@ def _compare_nas(config, top, local, local_paths, opener=None):
         return {'status': 'failed', 'reason': 'timeout' if isinstance(exc, (TimeoutError, subprocess.TimeoutExpired)) else 'lookup_failed'}, []
 
 
+@_materialize_dataless()
 def folder_scan(config: Any, args: dict[str, Any], runner: Any = None, opener: Any = None, **_: Any) -> str:
     """Everything below a folder in one answer: entries, counts by type, and files with identical content."""
     roots = folders(config)
@@ -1472,7 +1562,7 @@ def folder_scan(config: Any, args: dict[str, Any], runner: Any = None, opener: A
             relative = str(Path(exc.filename).relative_to(top))
         except (TypeError, ValueError):
             relative = "."
-        unreadable_folders.append({"path": relative, "error": type(exc).__name__, "errno": exc.errno})
+        unreadable_folders.append({"path": relative, "error": _file_error(exc), "errno": exc.errno})
     for current, names, files_here in os.walk(top, onerror=onerror):
         names[:] = sorted(name for name in names if not name.startswith("."))
         key = unicodedata.normalize('NFC', str(Path(current).relative_to(top)))
@@ -1543,6 +1633,7 @@ def folder_scan(config: Any, args: dict[str, Any], runner: Any = None, opener: A
     return json.dumps(result, ensure_ascii=False)
 
 
+@_materialize_dataless()
 def file_copy(config: Any, args: dict[str, Any], **_: Any) -> str:
     roots = folders(config)
     if reason := problem("file_copy", args, roots):
@@ -1554,7 +1645,7 @@ def file_copy(config: Any, args: dict[str, Any], **_: Any) -> str:
             shutil.copyfileobj(reader, writer)
         shutil.copystat(source, target)
     except OSError as exc:
-        return _error(f"could not copy: {type(exc).__name__}")
+        return _error(f"could not copy: {_file_error(exc)}")
     return json.dumps({"ok": True, "copied": {"from": str(source), "to": str(target)}}, ensure_ascii=False)
 
 
@@ -1562,11 +1653,11 @@ def _work(job: dict[str, Any], target: Path, *, replace: bool, runner: Any = Non
     """Run the worker into a temporary file beside ``target`` and move it into place on success."""
     if not DOC_PYTHON.exists():
         return _error("the document editing environment (~/.local/share/hermes-docs) is missing; "
-                      "it has to be rebuilt in the Paseo hermes-config project")
+                      "it has to be rebuilt in the Paseo Hermes-desktop-pet project")
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
-        return _error(f"could not create the destination folder: {type(exc).__name__}")
+        return _error(f"could not create the destination folder: {_file_error(exc)}")
     temporary = target.with_name(f".~{secrets.token_hex(6)}{target.suffix}")
     try:
         result = (runner or subprocess.run)(
@@ -1588,7 +1679,7 @@ def _work(job: dict[str, Any], target: Path, *, replace: bool, runner: Any = Non
             os.link(temporary, target)  # atomic creation: a concurrent writer cannot be overwritten
         return json.dumps({"ok": True, "saved": str(target), "done": answer.get("done", [])}, ensure_ascii=False)
     except (OSError, subprocess.SubprocessError) as exc:
-        return _error(f"could not edit the document: {type(exc).__name__}")
+        return _error(f"could not edit the document: {_file_error(exc)}")
     finally:
         try:
             temporary.unlink()
@@ -1596,9 +1687,12 @@ def _work(job: dict[str, Any], target: Path, *, replace: bool, runner: Any = Non
             pass
 
 
+@_materialize_dataless()
 def doc_edit(config: Any, args: dict[str, Any], runner: Any = None, **_: Any) -> str:
     roots = folders(config)
     if reason := problem("doc_edit", args, roots):
+        return _error(reason)
+    if reason := _prepare_document_inputs("doc_edit", args, roots):
         return _error(reason)
     path = inside(args.get("path"), roots)
     create = args.get("create") is True
@@ -1616,17 +1710,20 @@ def _fill_job(kind: str, args: dict[str, Any], roots: list[Path]) -> dict[str, A
             "name_pattern": args.get("name_pattern"), "max_rows": MAX_FILL_ROWS}
 
 
+@_materialize_dataless()
 def doc_fill(config: Any, args: dict[str, Any], runner: Any = None, **_: Any) -> str:
     roots = folders(config)
     if not roots:
         return _error("No folders are configured for this profile")
     if reason := problem("doc_fill", args, roots):
         return _error(reason)
+    if reason := _prepare_document_inputs("doc_fill", args, roots):
+        return _error(reason)
     if args["action"] == "inspect":
         return _ask(_fill_job("fill_inspect", args, roots), runner=runner)
     if not DOC_PYTHON.exists():
         return _error("the document editing environment (~/.local/share/hermes-docs) is missing; "
-                      "it has to be rebuilt in the Paseo hermes-config project")
+                      "it has to be rebuilt in the Paseo Hermes-desktop-pet project")
     out = inside(args.get("output_dir"), roots)
     made, created = not out.exists(), []
     try:
@@ -1634,7 +1731,7 @@ def doc_fill(config: Any, args: dict[str, Any], runner: Any = None, **_: Any) ->
         staging = out.parent / f".~fill-{secrets.token_hex(6)}"
         staging.mkdir()
     except OSError as exc:
-        return _error(f"could not prepare the output folder: {type(exc).__name__}")
+        return _error(f"could not prepare the output folder: {_file_error(exc)}")
     try:
         result = (runner or subprocess.run)(
             [str(DOC_PYTHON), str(Path(__file__).with_name("doc_worker.py"))],
@@ -1660,7 +1757,7 @@ def doc_fill(config: Any, args: dict[str, Any], runner: Any = None, **_: Any) ->
                 out.rmdir()
             except OSError:
                 pass
-        reason = "a file with that name already exists (nothing is overwritten)" if isinstance(exc, FileExistsError) else type(exc).__name__
+        reason = "a file with that name already exists (nothing is overwritten)" if isinstance(exc, FileExistsError) else _file_error(exc)
         return _error(f"could not fill the template: {reason}")
     finally:
         shutil.rmtree(staging, ignore_errors=True)
@@ -1672,15 +1769,19 @@ def doc_fill(config: Any, args: dict[str, Any], runner: Any = None, **_: Any) ->
                        "note": "빈 값은 문서에 «누락: 토큰»으로 보이게 표시했다. 보내거나 서명하지 않았다."}, ensure_ascii=False)
 
 
+@_materialize_dataless()
 def pdf_pages(config: Any, args: dict[str, Any], runner: Any = None, **_: Any) -> str:
     roots = folders(config)
     if reason := problem("pdf_pages", args, roots):
+        return _error(reason)
+    if reason := _prepare_document_inputs("pdf_pages", args, roots):
         return _error(reason)
     sources = [{"path": str(inside(item.get("path"), [*roots, attachments(), image_attachments()])),
                 "pages": item.get("pages"), "rotate": item.get("rotate")} for item in args["sources"]]
     return _work({"kind": "pdf", "sources": sources}, inside(args.get("to"), roots), replace=False, runner=runner)
 
 
+@_materialize_dataless()
 def doc_convert(config: Any, args: dict[str, Any], runner: Any = None, **_: Any) -> str:
     if not available(config, "doc_convert"):
         return _error("doc_convert is disabled for this profile")
@@ -1688,6 +1789,8 @@ def doc_convert(config: Any, args: dict[str, Any], runner: Any = None, **_: Any)
     if not roots:
         return _error("No folders are configured for this profile")
     if reason := problem("doc_convert", args, roots):
+        return _error(reason)
+    if reason := _prepare_document_inputs("doc_convert", args, roots):
         return _error(reason)
     source = inside(args.get("from"), [*roots, attachments(), image_attachments()])
     target = inside(args.get("to"), roots)

@@ -11,6 +11,8 @@ try:
 except ImportError:
     import google_calendar_accounts as google_calendar
 
+import source_lookup
+
 SCOPED_TOOLS = frozenset({'calendar_direct_mutation', 'reminders_direct_mutation',
     'apple_notes_direct_mutation', 'personal_work_bundle', 'personal_work_rollback',
     'gmail_direct', 'google_calendar_color_set'})
@@ -131,6 +133,15 @@ def scope_of(cfg, domain, row):
 
 def native_metadata(td, domain, args, context):
     if domain == 'calendar':
+        wanted = args.get('event_id') or args.get('eventkit_id')
+        # Exact-ID read is independent of today's query window. Mutations still
+        # validate the original occurrence and destination below.
+        original = None
+        if wanted:
+            outcome = td._calendar_event_lookup(wanted, context.get('runner') or subprocess.run)
+            original = outcome.get('row')
+            if outcome['status'] not in {'ok','unsupported'}:
+                source_lookup.require(outcome)
         date = str(args.get('expected_start') or args.get('start') or args.get('date') or 'today')[:10]
         reply = json.loads(td._calendar_direct_lookup({'date': date}, **context))
         if reply.get('ok') is not True:
@@ -138,9 +149,9 @@ def native_metadata(td, domain, args, context):
         receipt = reply['receipt']; rows = receipt['calendar_results']; item = None
         wanted = args.get('event_id') or args.get('eventkit_id')
         if wanted:
-            events = [v for v in receipt['results'] if wanted in {v.get('calendarItemIdentifier'), v.get('eventIdentifier')}]
-            if len(events) != 1:
-                raise ValueError(UNKNOWN)
+            events = [original] if original else []
+            if not events:
+                raise source_lookup.SourceReadError('transient','calendar_scope_unverified')
             selected = [r for r in rows if r.get('identifier') == events[0].get('calendarIdentifier')]
             if len(selected) != 1:
                 raise ValueError(UNKNOWN)
@@ -160,7 +171,9 @@ def native_metadata(td, domain, args, context):
         lists = [{'id': row.get('id'), 'name': row.get('title')} for row in read(['remindctl', 'list'])]
         item = None
         if args.get('reminder_id'):
-            found = [row for row in read(['remindctl', 'show', 'all']) if row.get('id') == args['reminder_id']]
+            import reminder_reads
+            row = reminder_reads.one(args['reminder_id'], runner)
+            found = [row] if row is not None else []
             if len(found) != 1:raise ValueError(UNKNOWN)
             matched = [row for row in lists if row.get('id') == found[0].get('listID')
                        and row.get('name') == found[0].get('listName')]
@@ -170,11 +183,26 @@ def native_metadata(td, domain, args, context):
     source = Path(__file__).with_name('personal_scope_native.js')
     payload = {'domain': domain, 'id': args.get('note_id' if domain == 'notes' else 'reminder_id')}
     runner = context.get('runner') or subprocess.run
-    proc = runner(['osascript', '-l', 'JavaScript', str(source), json.dumps(payload)],
-                  capture_output=True, text=True, timeout=20, check=False)
+    try:
+        proc = runner(['osascript', '-l', 'JavaScript', str(source), json.dumps(payload)],
+                      capture_output=True, text=True, timeout=20, check=False)
+    except subprocess.TimeoutExpired:
+        raise source_lookup.SourceReadError('transient', 'notes_read_timeout') from None
+    except OSError:
+        raise source_lookup.SourceReadError('transient', 'notes_read_failed') from None
     if proc.returncode != 0:
-        raise ValueError(UNKNOWN)
-    return json.loads(proc.stdout)
+        source_lookup.require(source_lookup.notes_failure(proc.stderr or ''))
+    try:
+        value = json.loads(proc.stdout)
+    except (ValueError, TypeError):
+        raise source_lookup.SourceReadError('transient', 'notes_read_invalid') from None
+    if not isinstance(value, dict):
+        raise source_lookup.SourceReadError('transient', 'notes_read_invalid')
+    if value.get('source_status'):
+        if value.get('source_status') == 'missing' and value.get('source_reason') in {'notes_store_missing', 'note_not_found'}:
+            raise source_lookup.SourceReadError('missing', value['source_reason'])
+        raise source_lookup.SourceReadError('transient', 'notes_read_invalid')
+    return value
 
 
 def authorize_mutation(td, domain, args, context, *, scope_config=None, owner_scope=None):

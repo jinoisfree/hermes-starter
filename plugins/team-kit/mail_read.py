@@ -226,7 +226,7 @@ def main():
         root = Path(request['root'])
         sys.path.insert(0, str(root / 'hermes-agent'))
         script = root / 'hermes-agent/skills/productivity/google-workspace/scripts/google_api.py'
-        spec = importlib.util.spec_from_file_location('hippo_google_api', script)
+        spec = importlib.util.spec_from_file_location('office_google_api', script)
         api = importlib.util.module_from_spec(spec); spec.loader.exec_module(api)
         api.HERMES_HOME = root
         api.TOKEN_PATH = root / 'google_token.json'

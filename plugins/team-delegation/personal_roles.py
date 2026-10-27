@@ -7,7 +7,7 @@ READS = frozenset({
     'gmail_direct', 'messages_direct_lookup', 'google_calendar_color_get', 'common_work_get', 'knowledge_ref_get',
     'request_usage_lookup', 'read_file', 'search_files', 'file_list', 'folder_scan',
     'doc_read', 'pdf_render', 'file_location', 'vision_analyze', 'notion', 'slack_history',
-    'work_crosscheck', 'mail_waiting', 'deadline_watch', 'cron_status', 'cronjob_manage', 'morning_report',
+    'work_crosscheck', 'mail_waiting', 'deadline_watch', 'cron_status', 'cronjob_manage', 'team_wait', 'morning_report',
     'web_search', 'web_extract', 'browser_navigate', 'browser_snapshot', 'browser_scroll',
     'browser_back', 'skill_view', 'skills_list', 'session_search', 'memory',
     'team_learn', 'team_learn_review', 'team_skill_review', 'report_status', 'team_recall', 'team_work', 'team_project',
@@ -25,7 +25,8 @@ PERSONAL_WRITES = frozenset({
     'knowledge_ref_link', 'knowledge_ref_unlink',
 })
 CONTACTS_TOOLS = frozenset({'contacts_direct_lookup', 'contacts_direct_mutation'})
-HIPPO_TOOLS = CONTACTS_TOOLS | frozenset({
+OFFICE_TOOLS = CONTACTS_TOOLS | frozenset({
+    'task_reminders_sync', 'mail_work',
     'skill_view', 'skills_list', 'memory', 'session_search', 'team_learn', 'team_learn_review', 'team_skill_review', 'report_status',
     'team_recall', 'team_project', 'morning_report', 'team_diagnosis_request',
     'read_file', 'search_files', 'file_list', 'folder_scan', 'doc_read', 'pdf_render',
@@ -34,13 +35,13 @@ HIPPO_TOOLS = CONTACTS_TOOLS | frozenset({
     'doc_compare', 'table_analyze', 'notion', 'web_search', 'web_extract',
     'notes_read', 'calendar_read', 'reminders_read', 'mail_read',
     'common_work_get', 'knowledge_ref_get',
-    'work_crosscheck', 'mail_waiting', 'slack_history', 'deadline_watch', 'cronjob_manage',
+    'work_crosscheck', 'mail_waiting', 'slack_history', 'deadline_watch', 'cronjob_manage', 'team_wait',
 })
 SECRETARY_FILES = frozenset({'file_move','file_copy','folder_create','doc_edit','pdf_pages',
     'doc_convert','write_file','patch','file_trash','file_link','doc_compare','table_analyze'})
 SECRETARY_BROWSER = frozenset({'browser_navigate','browser_snapshot','browser_scroll','browser_back',
     'browser_click','browser_type','browser_press'})
-HIPPO_TOOLS |= SECRETARY_BROWSER
+OFFICE_TOOLS |= SECRETARY_BROWSER
 
 
 MAIL_READ_ACTIONS = {'lookup', 'read', 'thread', 'download', 'accounts', 'ack'}
@@ -67,6 +68,9 @@ def executor(td):
 
 
 def problem(td, name, args):
+    if name == 'task_reminders_sync':
+        from tools.approval_context import _approval_session_id
+        return td.task_reminders_sync.role_problem(td, session_id=str(_approval_session_id.get() or ''))
     # Contacts are never part of shared secretary reads, personal bundles or rollback.
     # Keep this boundary even when the optional personal_roles setting is disabled.
     if name in CONTACTS_TOOLS:

@@ -37,6 +37,17 @@ on run argv
             on error
                 error "APPLE_NOTES_NOTE_NOT_FOUND"
             end try
+            if actionName is "replace_body_cas" then
+                -- 진행도 text edit for notes with tables/photos: compare-and-set the whole body.
+                -- Bodies with inline photos exceed argv limits, so items 5 and 6 are UTF-8 file paths.
+                -- The caller verifies tables, photos and text afterwards.
+                if (count of argv) is not 6 then error "APPLE_NOTES_ARGUMENT_ERROR"
+                set wantedHTML to read (POSIX file bodyHTML) as «class utf8»
+                set expectedHTML to read (POSIX file (item 6 of argv)) as «class utf8»
+                if (body of selectedNote as text) is not expectedHTML then error "APPLE_NOTES_CONCURRENT_CHANGE"
+                set body of selectedNote to wantedHTML
+                return (id of selectedNote) & tab & (name of selectedNote)
+            end if
             if actionName is "append_plain" or actionName is "restore_plain" then
                 if (count of argv) is not 6 then error "APPLE_NOTES_ARGUMENT_ERROR"
                 if (count of attachments of selectedNote) is not 0 then error "APPLE_NOTES_HAS_ATTACHMENTS"

@@ -12,8 +12,8 @@ _spec.loader.exec_module(_TASKS)
 import threading
 
 NOTE = """[일하는 방법 학습]
-Slack 소유자의 지속적인 교정은 team_learn으로 즉시 반영하고 다음날 08:30 학습 보고(학원 채널, 설정이 없으면 개인 DM)에서 검토받는다.
-학습·교정·새로운 요령을 다룰 때 jarvis-learning 스킬을 먼저 연다.
+Slack 소유자의 지속적인 교정은 team_learn으로 즉시 반영하고 다음날 08:30 학습 보고(학습 채널, 설정이 없으면 개인 DM)에서 검토받는다.
+학습·교정·새로운 요령을 다룰 때 assistant-learning 스킬을 먼저 연다.
 사용자 사실·환경·합의는 memory, 짧은 업무 공통 원칙은 target=rule, 특정 업무의 절차·판단·사이트 요령은 target=skill이다.
 같은 내용을 memory·규칙·스킬에 중복 저장하지 않는다. 기존 스킬을 읽고 해당 부분을 고친다.
 target=skill은 skill, rule(변경 요약), operations, user_said와 lesson(scope·exceptions·check·reason)을 넣는다.
@@ -35,7 +35,7 @@ def note(home):
     if "task_skills" not in cfg:
         return NOTE
     name = _TASKS.mapping(cfg).get("learn")
-    old = "학습·교정·새로운 요령을 다룰 때 jarvis-learning 스킬을 먼저 연다.\n"
+    old = "학습·교정·새로운 요령을 다룰 때 assistant-learning 스킬을 먼저 연다.\n"
     return NOTE.replace(old, f"학습·교정·새로운 요령을 다룰 때 {name} 스킬을 먼저 연다.\n" if name else "")
 
 

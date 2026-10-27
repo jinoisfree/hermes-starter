@@ -37,6 +37,7 @@ struct EventSnapshot: Codable {
     let isAllDay: Bool
     let calendarIdentifier: String
     let calendar: String
+    let calendarSource: String
     let location: String?
     let notes: String?
     let url: String?
@@ -77,6 +78,7 @@ func snapshot(_ event: EKEvent) -> EventSnapshot {
         isAllDay: event.isAllDay,
         calendarIdentifier: event.calendar.calendarIdentifier,
         calendar: event.calendar.title,
+        calendarSource: event.calendar.source.title,
         location: event.location,
         notes: event.notes,
         url: event.url?.absoluteString,

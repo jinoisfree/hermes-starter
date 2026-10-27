@@ -1,8 +1,10 @@
 name: team-delegation
-version: 0.6.12
+version: 0.6.17
 description: "Governed workflow budgets, EventKit calendar executor, canonical ownership."
 author: starter_user
 provides_tools:
+  - task_reminders_sync
+  - mail_work
   - contacts_direct_lookup
   - contacts_direct_mutation
   - diagnosis_health_read
@@ -34,6 +36,8 @@ provides_tools:
   - personal_report
   - limit_report
 provides_hooks:
+  - pre_gateway_dispatch
+  - post_llm_call
   - pre_tool_call
   - post_approval_response
   - transform_llm_output
